@@ -1,0 +1,5 @@
+# requirements.txt
+flet==0.80.5
+sqlalchemy==2.0.23
+python-dotenv==1.0.0
+bcrypt==4.0.1
