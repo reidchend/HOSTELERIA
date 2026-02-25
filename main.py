@@ -1,12 +1,12 @@
-#main.py
-
 import flet as ft
 from sqlalchemy import func
 from database.connection import init_db, SessionLocal
 from database.models import Room, RoomStatus
 from modules.auth.login import LoginScreen
 from modules.rooms.management import RoomGrid
+from modules.rooms.details import RoomDetailsDialog
 from utils.helpers import load_config_from_db
+from modules.finance.cash_opening import CashOpeningDialog
 
 def main(page: ft.Page):
     # --- Configuración de la página ---
@@ -26,6 +26,9 @@ def main(page: ft.Page):
     db_init = SessionLocal()
     try:
         config_dict = load_config_from_db(db_init)
+    except Exception as e:
+        print(f"Error cargando configuración: {e}")
+        config_dict = {}
     finally:
         db_init.close()
     
@@ -35,15 +38,15 @@ def main(page: ft.Page):
         "exchange_rate": float(config_dict.get("exchange_rate", 35.5)),
         "hotel_name": config_dict.get("hotel_name", "Mi Hotel"),
         "selected_room": None,
+        "active_view": "dashboard" # 'dashboard' o 'settings'
     }
 
     # --- Funciones de Lógica de Negocio ---
-
+    
     def update_summary_stats():
-        """Obtiene estadísticas de habitaciones en una sola consulta (Optimizado)"""
+        """Obtiene estadísticas de habitaciones en una sola consulta"""
         db = SessionLocal()
         try:
-            # Agrupamos por estado y contamos
             results = db.query(Room.status, func.count(Room.id)).group_by(Room.status).all()
             counts = {status: count for status, count in results}
             
@@ -55,24 +58,62 @@ def main(page: ft.Page):
                 "cleaning": counts.get(RoomStatus.CLEANING, 0),
                 "maintenance": counts.get(RoomStatus.MAINTENANCE, 0)
             }
+        except Exception as e:
+            print(f"Error al actualizar estadísticas: {e}")
+            return {"total": 0, "free": 0, "occupied": 0, "reserved": 0, "cleaning": 0, "maintenance": 0}
         finally:
             db.close()
 
     def handle_room_click(room):
-        from modules.rooms.checkin import CheckInDialog
+        """Maneja el clic en una habitación según su estado"""
         if room.status == RoomStatus.FREE:
-            # Si está libre, abrimos el Check-in
+            from modules.rooms.checkin import CheckInDialog
             dialog = CheckInDialog(
                 page, 
                 room, 
-                on_success=refresh_view # Esta función debe recargar tu RoomGrid
+                on_success=refresh_view
             )
             dialog.show()
+            
         elif room.status == RoomStatus.OCCUPIED:
-            # Aquí luego haremos el Check-out o ver info
-            page.open(ft.SnackBar(ft.Text(f"Habitación ocupada por: {room.current_guest_name}")))
+            details = RoomDetailsDialog(
+                page, 
+                room, 
+                on_checkout_request=handle_checkout_flow
+            )
+            details.show()
+
+    def handle_checkout_flow(room):
+        """Inicia el proceso de check-out"""
+        page.open(ft.SnackBar(ft.Text(f"Iniciando proceso de salida para Hab {room.number}...")))
+
+    # --- Funciones de Navegación y Renderizado ---
+
+    def refresh_view():
+        """Refresca el contenido de la vista activa"""
+        render_app_content()
+
+    def toggle_view(view_name):
+        """Cambia entre la vista de dashboard y configuración"""
+        app_state["active_view"] = view_name
+        render_app_content()
+
+    def load_dashboard(final_rate):
+        """Callback tras apertura de caja"""
+        app_state["exchange_rate"] = final_rate
+        app_state["active_view"] = "dashboard"
+        render_app_content()
+        print("🚀 Sesión iniciada y Dashboard cargado")
+
+    def logout():
+        """Limpia el estado y vuelve al login"""
+        app_state["current_user"] = None
+        show_login()
+
+    # --- Componentes de Interfaz ---
 
     def create_summary_cards():
+        """Crea las tarjetas informativas superiores"""
         stats = update_summary_stats()
         
         def build_card(label, value, color, subtext):
@@ -83,7 +124,7 @@ def main(page: ft.Page):
                         ft.Text(str(value), size=28, weight=ft.FontWeight.BOLD, color=color),
                         ft.Text(subtext, size=10, color=ft.Colors.GREY_600),
                     ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=2),
-                    padding=10, width=130,
+                    padding=10, width=140,
                 )
             )
 
@@ -92,98 +133,135 @@ def main(page: ft.Page):
                 build_card("Total", stats["total"], ft.Colors.BLACK, "habitaciones"),
                 build_card("Libres", stats["free"], ft.Colors.GREEN, "disponibles"),
                 build_card("Ocupadas", stats["occupied"], ft.Colors.RED, "con huéspedes"),
-                build_card("Reservadas", stats["reserved"], ft.Colors.ORANGE, "próximas"),
-                build_card("Aseo", stats["cleaning"], ft.Colors.BLUE, "en limpieza"),
+                build_card("Limpieza", stats["cleaning"], ft.Colors.BLUE, "en aseo"),
                 build_card("Mantenimiento", stats["maintenance"], ft.Colors.PURPLE, "fuera de servicio"),
-            ], alignment=ft.MainAxisAlignment.CENTER, spacing=10),
+            ], alignment=ft.MainAxisAlignment.CENTER, spacing=15),
             padding=20,
         )
 
-    def create_main_interface():
-        # Barra superior (Header)
-        top_bar = ft.Container(
+    def create_top_bar():
+        """Crea la barra de navegación superior"""
+        user_info = app_state["current_user"]
+        user_name = user_info["full_name"] if user_info else "Usuario"
+
+        return ft.Container(
             content=ft.Row([
+                # Logo y Nombre
                 ft.Row([
-                    ft.Icon(ft.Icons.HOTEL, size=30, color=ft.Colors.BLUE),
-                    ft.Text(app_state["hotel_name"], size=20, weight=ft.FontWeight.BOLD),
+                    ft.Icon(ft.Icons.HOTEL, size=32, color=ft.Colors.BLUE_700),
+                    ft.Text(app_state["hotel_name"], size=22, weight="bold", color=ft.Colors.BLUE_900),
                 ]),
+                
+                # Acciones y Usuario
                 ft.Row([
+                    # Botón dinámico según la vista
+                    ft.ElevatedButton(
+                        text="Dashboard" if app_state["active_view"] == "settings" else "Configuración",
+                        icon=ft.Icons.DASHBOARD if app_state["active_view"] == "settings" else ft.Icons.SETTINGS,
+                        on_click=lambda _: toggle_view("dashboard" if app_state["active_view"] == "settings" else "settings"),
+                        style=ft.ButtonStyle(
+                            color=ft.Colors.BLUE_700,
+                            bgcolor=ft.Colors.BLUE_50,
+                            shape=ft.RoundedRectangleBorder(radius=8)
+                        )
+                    ),
+                    
+                    ft.VerticalDivider(width=20),
+                    
+                    # Tasa de cambio
                     ft.Container(
                         content=ft.Row([
-                            ft.Icon(ft.Icons.ATTACH_MONEY, size=20),
-                            ft.Text(f"Tasa: Bs. {app_state['exchange_rate']:.2f}", size=14),
+                            ft.Icon(ft.Icons.ATTACH_MONEY, size=18, color=ft.Colors.GREEN_700),
+                            ft.Text(f"Tasa: Bs. {app_state['exchange_rate']:.2f}", size=14, weight="bold"),
                         ]),
-                        padding=10, bgcolor=ft.Colors.BLUE_50, border_radius=5,
+                        padding=ft.padding.all(8),
+                        bgcolor=ft.Colors.GREEN_50,
+                        border_radius=8
                     ),
+                    
                     ft.VerticalDivider(width=20),
-                    ft.Column([
-                        ft.Text(f"Usuario: {app_state['current_user']['full_name'] if app_state['current_user'] else 'Admin'}", size=14, weight=ft.FontWeight.W_500),
-                        ft.Text(f"Rol: {app_state['current_user']['role'] if app_state['current_user'] else 'Staff'}", size=12, color=ft.Colors.GREY_700),
-                    ], spacing=0),
-                    ft.IconButton(icon=ft.Icons.LOGOUT, on_click=lambda _: logout())
-                ]),
+                    
+                    # Perfil de usuario
+                    ft.Row([
+                        ft.Column([
+                            ft.Text(user_name, size=14, weight="bold"),
+                            ft.Text(user_info["role"] if user_info else "", size=11, color=ft.Colors.GREY_600),
+                        ], spacing=0, horizontal_alignment=ft.CrossAxisAlignment.END),
+                        ft.CircleAvatar(
+                            content=ft.Icon(ft.Icons.PERSON),
+                            radius=18,
+                            bgcolor=ft.Colors.BLUE_GREY_100
+                        ),
+                        ft.IconButton(
+                            icon=ft.Icons.LOGOUT_ROUNDED,
+                            icon_color=ft.Colors.RED_400,
+                            tooltip="Cerrar Sesión",
+                            on_click=lambda _: logout()
+                        )
+                    ])
+                ], spacing=15)
             ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
-            padding=15, bgcolor=ft.Colors.WHITE,
-            border=ft.border.only(bottom=ft.BorderSide(1, ft.Colors.GREY_300)),
+            padding=ft.padding.symmetric(horizontal=25, vertical=12),
+            bgcolor=ft.Colors.WHITE,
+            border=ft.border.only(bottom=ft.border.BorderSide(1, ft.Colors.BLACK12))
         )
-        
-        rooms_grid = RoomGrid(app_state, handle_room_click)
-        
-        return ft.Column([
-            top_bar,
-            create_summary_cards(),
-            ft.Container(content=rooms_grid.build(), expand=True, padding=20),
-        ], expand=True)
 
-    def refresh_view():
-        """Refresca la pantalla completa para mostrar cambios de estado"""
+    def render_app_content():
+        """Función central que dibuja la interfaz principal o configuración"""
         page.clean()
-        page.add(create_main_interface())
+        
+        # Header común
+        header = create_top_bar()
+        
+        if app_state["active_view"] == "dashboard":
+            # Vista Principal (Mapa de Habitaciones)
+            rooms_grid = RoomGrid(app_state, handle_room_click)
+            content = ft.Column([
+                create_summary_cards(),
+                ft.Container(
+                    content=rooms_grid.build(), 
+                    expand=True, 
+                    padding=ft.padding.symmetric(horizontal=30, vertical=10)
+                ),
+            ], expand=True, spacing=0)
+        else:
+            # Vista de Configuración / Finanzas
+            # Aquí podrías importar tu vista de gestión de caja chica
+            from modules.finance.cash_management import CashManagement
+            content = CashManagement(page, app_state)
+
+        page.add(
+            ft.Column([
+                header,
+                ft.Container(content=content, expand=True)
+            ], expand=True, spacing=0)
+        )
         page.update()
 
-    def logout():
-        app_state["current_user"] = None
-        show_login()
-
     def show_login():
+        """Muestra la pantalla de login"""
         page.clean()
-        # Reset de la página para que el gradiente mande
         page.padding = 0
         page.spacing = 0
-        # Ponemos START para que el hijo (Container expandido) tome todo el control
         page.vertical_alignment = ft.MainAxisAlignment.START
         page.horizontal_alignment = ft.CrossAxisAlignment.START
         
         login_screen = LoginScreen(page, on_login_success)
-        
-        # Agregamos el login_screen.build() que ahora tiene expand=True
         page.add(login_screen.build())
         page.update()
 
     def on_login_success(user):
+        """Maneja el éxito del login y lanza apertura de caja"""
         app_state["current_user"] = user
-        print(f"✅ Login exitoso para: {user['full_name']}") # Debug
         
-        try:
-            page.clean()
-            # Resetear visuales para el Dashboard
-            page.vertical_alignment = ft.MainAxisAlignment.START
-            page.horizontal_alignment = ft.CrossAxisAlignment.START
-            page.padding = 0
-            
-            # Intentar construir la interfaz
-            dashboard = create_main_interface()
-            page.add(dashboard)
-            page.update()
-            print("🚀 Dashboard cargado correctamente")
-            
-        except Exception as e:
-            print(f"❌ ERROR CRÍTICO AL CARGAR DASHBOARD: {e}")
-            # Mostrar error en pantalla para que no quede en blanco
-            page.add(ft.Text(f"Error al cargar la interfaz: {e}", color="red"))
-            page.update()
-            
-    # Inicio de la aplicación
+        opening = CashOpeningDialog(
+            page, 
+            user, 
+            on_complete=load_dashboard 
+        )
+        opening.show()
+
+    # --- Inicio de la Aplicación ---
     show_login()
 
 if __name__ == "__main__":

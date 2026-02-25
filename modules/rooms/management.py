@@ -2,7 +2,8 @@ import flet as ft
 from database.models import Room, RoomStatus
 from database.connection import SessionLocal
 from sqlalchemy import cast, Integer
-from sqlalchemy.orm import joinedload
+from sqlalchemy.orm import selectinload
+from database.models import Room, Stay
 
 class RoomGrid:
     def __init__(self, app_state, on_room_click):
@@ -39,16 +40,16 @@ class RoomGrid:
         return self.grid_container
 
     def get_rooms(self):
-        """Obtiene habitaciones usando strings para evitar errores de importación circular"""
         db = SessionLocal()
         try:
-            # Usamos strings "active_stays" y "guests" en lugar de Room.active_stays y Stay.guests
-            return db.query(Room).options(
-                joinedload("active_stays").joinedload("guests")
+            # Usamos Room.active_stays y Stay.guests (Atributos de clase, NO strings)
+            rooms = db.query(Room).options(
+                selectinload(Room.active_stays).selectinload(Stay.guests)
             ).order_by(cast(Room.number, Integer)).all()
+            return rooms
         except Exception as e:
             print(f"❌ Error en get_rooms: {e}")
-            # Fallback por si el joinedload falla: traer solo las habitaciones
+            # Fallback simple si el eager loading falla
             return db.query(Room).order_by(cast(Room.number, Integer)).all()
         finally:
             db.close()
