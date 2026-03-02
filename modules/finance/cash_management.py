@@ -74,20 +74,20 @@ class CashManagement(ft.Container):
                 
                 if currency_selector.value == "USD":
                     if is_income:
-                        caja.main_balance_usd += amount
+                        caja.petty_cash_usd += amount
                     else:
-                        if caja.main_balance_usd < amount:
+                        if caja.petty_cash_usd < amount:
                             self.page.open(ft.SnackBar(ft.Text("Saldo insuficiente en USD")))
                             return
-                        caja.main_balance_usd -= amount
+                        caja.petty_cash_usd -= amount
                 else:
                     if is_income:
-                        caja.main_balance_bs += amount
+                        caja.petty_cash_bs += amount
                     else:
-                        if caja.main_balance_bs < amount:
+                        if caja.petty_cash_bs < amount:
                             self.page.open(ft.SnackBar(ft.Text("Saldo insuficiente en Bs")))
                             return
-                        caja.main_balance_bs -= amount
+                        caja.petty_cash_bs -= amount
                 
                 db.commit()
                 self.page.close(dialog)
@@ -132,8 +132,8 @@ class CashManagement(ft.Container):
         )
 
         # Tarjetas de Saldo
-        self.card_usd = self.create_balance_card("Saldo Dólares", f"$ {caja.main_balance_usd:.2f}", ft.Colors.GREEN_700, ft.Icons.ATTACH_MONEY)
-        self.card_bs = self.create_balance_card("Saldo Bolívares", f"Bs {caja.main_balance_bs:.2f}", ft.Colors.BLUE_700, ft.Icons.MONEY)
+        self.card_usd = self.create_balance_card("Saldo Dólares", f"$ {caja.petty_cash_usd:.2f}", ft.Colors.GREEN_700, ft.Icons.ATTACH_MONEY)
+        self.card_bs = self.create_balance_card("Saldo Bolívares", f"Bs {caja.petty_cash_bs:.2f}", ft.Colors.BLUE_700, ft.Icons.MONEY)
 
         self.content = ft.Column([
             ft.Row([
@@ -222,8 +222,8 @@ class CashManagement(ft.Container):
         caja, tasa = self.get_cash_data()
         if caja and tasa:
             # Actualizamos los labels directamente navegando por los controles
-            self.card_usd.content.controls[1].value = f"$ {caja.main_balance_usd:.2f}"
-            self.card_bs.content.controls[1].value = f"Bs {caja.main_balance_bs:.2f}"
+            self.card_usd.content.controls[1].value = f"$ {caja.petty_cash_usd:.2f}"
+            self.card_bs.content.controls[1].value = f"Bs {caja.petty_cash_bs:.2f}"
             self.rate_input.value = tasa.value
             self.update()
             self.page.update()
