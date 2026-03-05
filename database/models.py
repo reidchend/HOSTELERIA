@@ -45,6 +45,8 @@ class Guest(Base):
     profession = Column(String(50))
     phone = Column(String(20))
     vehicle_info = Column(String(100), nullable=True)
+    # Saldo a favor acumulado entre estadias (persiste entre visitas del huesped)
+    credit_balance_usd = Column(Float, default=0.0)
 
     @property
     def full_name(self):

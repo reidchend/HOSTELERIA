@@ -41,8 +41,8 @@ def reset_database():
         caja_inicial = CashDrawer(
             main_balance_usd=0.0,    # Ventas empiezan en 0
             main_balance_bs=0.0,
-            petty_cash_usd=200.0,    # Fondo fijo para vueltos
-            petty_cash_bs=5000.0,
+            petty_cash_usd=100.0,    # Fondo fijo para vueltos
+            petty_cash_bs=8000.0,
             last_update=datetime.now()
         )
         db.add(caja_inicial)
@@ -52,17 +52,17 @@ def reset_database():
         configs = [
             Configuration(
                 key="exchange_rate", 
-                value="36.50", 
+                value="10", 
                 description="Tasa de cambio oficial USD/BS"
             ),
             Configuration(
                 key="hotel_name", 
-                value="Hotel Paraíso", 
+                value="La Posada de Daniel", 
                 description="Nombre comercial del hotel"
             ),
             Configuration(
                 key="tax_percentage", 
-                value="0", 
+                value="16", 
                 description="Porcentaje de impuesto aplicado"
             ),
         ]
@@ -71,7 +71,7 @@ def reset_database():
         # 4. Crear habitaciones del 2 al 40
         print("🏨 Generando habitaciones (2 al 40)...")
         types = ["Estándar", "Doble", "Suite", "Familiar"]
-        prices = {"Estándar": 50.0, "Doble": 75.0, "Suite": 120.0, "Familiar": 90.0}
+        prices = {"Estándar": 43.10, "Doble": 75.0, "Suite": 120.0, "Familiar": 90.0}
         
         for i in range(2, 41):
             room_type = types[i % len(types)]
@@ -98,7 +98,7 @@ def reset_database():
         print("✅ BASE DE DATOS PREPARADA PARA PRUEBA DE FLUJO")
         print("="*40)
         print(f"Caja Principal: $0.00")
-        print(f"Caja Chica (Vueltos): $200.00")
+        print(f"Caja Chica (Vueltos): $100.00")
         print(f"Habitaciones: 39 Disponibles")
         print("="*40)
         

@@ -28,7 +28,7 @@ class ShiftClosingDialog:
 
     def calculate_system_balances(self):
         db = SessionLocal()
-        shift = db.query(Shift).get(self.shift_id)
+        shift = db.get(Shift, self.shift_id)  # SQLAlchemy 2.x: db.get() reemplaza query().get()
         # Sumar pagos de este turno (Caja Principal)
         payments = db.query(Payment).filter(
             Payment.created_at >= shift.start_time,
@@ -77,7 +77,7 @@ class ShiftClosingDialog:
     def finalize_shift(self, _):
         db = SessionLocal()
         try:
-            shift = db.query(Shift).get(self.shift_id)
+            shift = db.get(Shift, self.shift_id)  # SQLAlchemy 2.x: db.get() reemplaza query().get()
             shift.end_time = datetime.now()
             shift.final_usd_expected = self.summary["expected_main"]
             shift.final_usd_real = float(self.physical_main_usd.value)
@@ -95,7 +95,7 @@ class ShiftClosingDialog:
             
         except Exception as e:
             db.rollback()
-            self.page.show_snack_bar(ft.SnackBar(ft.Text(f"Error: {e}")))
+            self.page.open(ft.SnackBar(ft.Text(f"Error: {e}")))  # API correcta en Flet moderno
         finally:
             db.close()
 
@@ -133,4 +133,3 @@ class ShiftClosingDialog:
             ]
         )
         self.page.open(self.dialog)
-        

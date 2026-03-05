@@ -40,13 +40,14 @@ class ExtraChargeDialog:
 
             # 2. Si se eligió usar el fondo, descontar
             if self.use_deposit.value:
-                # Refrescar stay para evitar inconsistencias
-                stay_db = db.query(Stay).get(self.stay.id)
+                stay_db = db.get(Stay, self.stay.id)  # SQLAlchemy 2.x: usar db.get()
                 if stay_db.deposit_balance_usd >= monto:
                     stay_db.deposit_balance_usd -= monto
-                    nuevo_cargo.description = "Saldado con fondo a favor"
+                    # ExtraCharge no tiene campo 'description'; anotamos en service_name
+                    nuevo_cargo.service_name += " (Saldado con fondo a favor)"
                 else:
-                    self.page.show_snack_bar(ft.SnackBar(ft.Text("Fondo insuficiente para cubrir el total")))
+                    # page.open() es la API correcta en Flet moderno
+                    self.page.open(ft.SnackBar(ft.Text("Fondo insuficiente para cubrir el total")))
                     return
 
             db.commit()
@@ -54,7 +55,8 @@ class ExtraChargeDialog:
             self.on_success()
         except Exception as e:
             db.rollback()
-            self.page.show_snack_bar(ft.SnackBar(ft.Text(f"Error: {e}")))
+            # page.open() es la API correcta en Flet moderno
+            self.page.open(ft.SnackBar(ft.Text(f"Error: {e}")))
         finally:
             db.close()
 

@@ -15,7 +15,7 @@ DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///hotel.db")
 engine = create_engine(
     DATABASE_URL, 
     connect_args={"check_same_thread": False} if "sqlite" in DATABASE_URL else {},
-    echo=True  # Muestra las consultas SQL en consola (útil para desarrollo)
+    echo=False  # Cambiado a False: True inundaba la consola con cada consulta SQL en producción
 )
 
 # Crear sesión local

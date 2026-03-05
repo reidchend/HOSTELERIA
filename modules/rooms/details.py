@@ -48,7 +48,9 @@ class RoomDetailsDialog:
             delta = (active_stay.check_out.date() - active_stay.check_in.date()).days
             dias_estadia = max(1, delta)
             
-            subtotal_hab = dias_estadia * self.room.base_price_usd
+            # Usamos room_data (recién cargado de BD) en lugar de self.room (puede ser stale)
+            precio_noche = room_data.current_price_usd if room_data.current_price_usd else room_data.base_price_usd
+            subtotal_hab = dias_estadia * precio_noche
             total_extras = sum(c.amount_usd for c in active_stay.extra_charges)
             pagado_usd = sum(p.amount_usd if not p.is_refund else -p.amount_usd for p in active_stay.payments)
             
@@ -238,11 +240,13 @@ class RoomDetailsDialog:
                     caja.main_balance_usd -= amount
                     description = "Vuelto devuelto desde Caja Principal"
                 elif source == "small":
-                    if caja.small_cash_usd < amount: raise Exception("Caja Chica sin fondos.")
-                    caja.small_cash_usd -= amount
+                    # El campo correcto del modelo es petty_cash_usd, no small_cash_usd
+                    if caja.petty_cash_usd < amount: raise Exception("Caja Chica sin fondos.")
+                    caja.petty_cash_usd -= amount
                     description = "Vuelto devuelto desde Caja Chica"
                 elif source == "admin_pm":
-                    method = PaymentMethod.TRANSFER 
+                    # PaymentMethod.TRANSFER no existe en el enum; el equivalente es PAGO_MOVIL
+                    method = PaymentMethod.PAGO_MOVIL
                     description = "Vuelto devuelto vía Pago Móvil Administrador"
 
                 refund_entry = Payment(
@@ -279,6 +283,9 @@ class RoomDetailsDialog:
         dialog.show()
 
     def refresh_details(self):
+        # Cerramos el diálogo actual antes de abrir uno nuevo para evitar apilamiento
+        if self.dialog:
+            self.page.close(self.dialog)
         self.show()
 
     def show(self):
