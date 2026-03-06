@@ -1,48 +1,53 @@
 # utils/helpers.py
 
 import bcrypt
-import json
 from datetime import datetime
 from typing import Optional
 
-def hash_password(password: str) -> str:
-    """Hashea una contraseña usando bcrypt"""
-    salt = bcrypt.gensalt()
-    return bcrypt.hashpw(password.encode('utf-8'), salt).decode('utf-8')
 
-def verify_password(password: str, hashed: str) -> bool:
-    """Verifica si una contraseña coincide con su hash"""
-    return bcrypt.checkpw(password.encode('utf-8'), hashed.encode('utf-8'))
+def hashear_contrasena(contrasena: str) -> str:
+    """Genera un hash seguro de la contraseña usando bcrypt."""
+    sal = bcrypt.gensalt()
+    return bcrypt.hashpw(contrasena.encode('utf-8'), sal).decode('utf-8')
 
-def load_config_from_db(db_session):
-    """Carga la configuración desde la base de datos"""
-    from database.models import Configuration
-    
+
+def verificar_contrasena(contrasena: str, hash_guardado: str) -> bool:
+    """Compara una contraseña en texto plano con su hash almacenado."""
+    return bcrypt.checkpw(contrasena.encode('utf-8'), hash_guardado.encode('utf-8'))
+
+
+def cargar_configuracion_bd(sesion_bd) -> dict:
+    """
+    Lee toda la tabla de configuración y devuelve un diccionario clave→valor.
+    Si la tabla no existe o está vacía, retorna valores por defecto.
+    """
+    from database.models import Configuracion
+
     config = {}
     try:
-        configurations = db_session.query(Configuration).all()
-        for conf in configurations:
-            config[conf.key] = conf.value
-    except:
-        # Si la tabla no existe o está vacía, devolver config por defecto
+        registros = sesion_bd.query(Configuracion).all()
+        for registro in registros:
+            config[registro.clave] = registro.valor
+    except Exception:
+        # Valores por defecto si la BD aún no está inicializada
         config = {
             "exchange_rate": "35.50",
-            "hotel_name": "Mi Hotel",
-            "currency_symbol": "$",
-            "local_currency": "Bs."
+            "hotel_name":    "Mi Hotel",
+            "tax_percentage": "0",
         }
     return config
 
-def format_currency(amount: float, currency: str = "USD") -> str:
-    """Formatea un monto como moneda"""
-    if currency == "USD":
-        return f"${amount:.2f}"
-    else:
-        return f"Bs. {amount:.2f}"
 
-def parse_date(date_str: str) -> Optional[datetime]:
-    """Convierte string a datetime si es válido"""
+def formatear_moneda(monto: float, moneda: str = "USD") -> str:
+    """Devuelve el monto formateado con su símbolo de moneda."""
+    if moneda == "USD":
+        return f"${monto:.2f}"
+    return f"Bs. {monto:,.2f}"
+
+
+def parsear_fecha(texto_fecha: str) -> Optional[datetime]:
+    """Convierte una cadena 'YYYY-MM-DD' a datetime. Devuelve None si el formato es inválido."""
     try:
-        return datetime.strptime(date_str, "%Y-%m-%d")
-    except:
+        return datetime.strptime(texto_fecha, "%Y-%m-%d")
+    except (ValueError, TypeError):
         return None

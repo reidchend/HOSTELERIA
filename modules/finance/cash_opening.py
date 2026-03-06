@@ -1,118 +1,151 @@
+# modules/finance/cash_opening.py
+
 import flet as ft
-from datetime import datetime  # <--- CORRECCIÓN 1: Importación faltante
-from database.connection import SessionLocal
-from database.models import CashDrawer, Configuration, Shift
+from datetime import datetime
+from database.connection import SesionLocal
+from database.models import Caja, Configuracion, Turno
 
-class CashOpeningDialog:
-    def __init__(self, page, user, on_complete):
-        self.page = page
-        self.user = user
-        self.on_complete = on_complete
-        
-        # Cargar datos actuales de la DB
-        db = SessionLocal()
+
+class DialogoAperturaTurno:
+    """
+    Diálogo de apertura de turno.
+    El recepcionista cuenta el efectivo físico e ingresa la tasa del día.
+    Al confirmar, se crea el registro del turno y se sincroniza la caja.
+    """
+
+    def __init__(self, pagina: ft.Page, usuario: dict, al_completar):
+        self.pagina       = pagina
+        self.usuario      = usuario
+        self.al_completar = al_completar
+        self.dialogo      = None
+
+        # Cargar datos actuales de la caja y la tasa
+        sesion = SesionLocal()
         try:
-            self.caja = db.query(CashDrawer).first()
-            tasa_cfg = db.query(Configuration).filter(Configuration.key == "exchange_rate").first()
-            self.current_tasa = float(tasa_cfg.value) if tasa_cfg else 0.0
+            caja = sesion.query(Caja).first()
+            config_tasa = sesion.query(Configuracion).filter(
+                Configuracion.clave == "exchange_rate"
+            ).first()
+            self.tasa_actual = float(config_tasa.valor) if config_tasa else 0.0
+            saldo_chica_usd  = caja.caja_chica_usd if caja else 0.0
+            saldo_chica_bs   = caja.caja_chica_bs  if caja else 0.0
         finally:
-            db.close()
+            sesion.close()
 
-        # Fields (Asegúrate de usar main_balance o petty_cash según tu lógica)
-        # Usamos petty_cash ya que es el fondo para vueltos que se valida al abrir
-        self.usd_field = ft.TextField(
-            label="Efectivo USD en Caja", 
-            value=f"{self.caja.petty_cash_usd:.2f}" if self.caja else "0.00", 
-            prefix_text="$ ", expand=True
+        # Campos del formulario
+        self.campo_usd = ft.TextField(
+            label="Efectivo USD en Caja",
+            value=f"{saldo_chica_usd:.2f}",
+            prefix_text="$ ", expand=True,
         )
-        self.bs_field = ft.TextField(
-            label="Efectivo Bs en Caja", 
-            value=f"{self.caja.petty_cash_bs:.2f}" if self.caja else "0.00", 
-            prefix_text="Bs ", expand=True
+        self.campo_bs = ft.TextField(
+            label="Efectivo Bs en Caja",
+            value=f"{saldo_chica_bs:.2f}",
+            prefix_text="Bs ", expand=True,
         )
-        self.tasa_field = ft.TextField(
-            label="Tasa de Cambio Hoy", 
-            value=f"{self.current_tasa:.2f}", 
-            expand=True
+        self.campo_tasa = ft.TextField(
+            label="Tasa de Cambio de Hoy",
+            value=f"{self.tasa_actual:.2f}",
+            expand=True,
         )
 
-    def confirm_opening(self, _):
-        db = SessionLocal()
+    def confirmar_apertura(self, evento):
+        """
+        Crea el turno en la BD, actualiza la tasa global y sincroniza la caja.
+        Llama al callback al_completar con la tasa ingresada.
+        """
+        sesion = SesionLocal()
         try:
-            usd_fisico = float(self.usd_field.value)
-            bs_fisico = float(self.bs_field.value)
-            tasa_ingresada = float(self.tasa_field.value)
+            usd_fisico   = float(self.campo_usd.value)
+            bs_fisico    = float(self.campo_bs.value)
+            tasa_ingresada = float(self.campo_tasa.value)
 
-            # 1. Crear el nuevo turno
-            nuevo_turno = Shift(
-                user_id=self.user['id'],
-                initial_usd=usd_fisico,
-                initial_bs=bs_fisico,
-                initial_exchange_rate=tasa_ingresada,
-                is_active=True,
-                start_time=datetime.now()
+            # 1. Crear el registro del turno
+            nuevo_turno = Turno(
+                usuario_id   = self.usuario['id'],
+                hora_inicio  = datetime.now(),
+                inicial_usd  = usd_fisico,
+                inicial_bs   = bs_fisico,
+                tasa_inicial = tasa_ingresada,
+                activo       = True,
             )
-            db.add(nuevo_turno)
-            
-            # 2. Actualizar la tasa en la configuración global
-            tasa_cfg = db.query(Configuration).filter(Configuration.key == "exchange_rate").first()
-            if tasa_cfg:
-                tasa_cfg.value = str(tasa_ingresada)
-            
-            # 3. Sincronizar la Caja Física (CashDrawer)
-            caja_db = db.query(CashDrawer).first()
-            if caja_db:
-                caja_db.petty_cash_usd = usd_fisico
-                caja_db.petty_cash_bs = bs_fisico
-                # Nota: Verifica si tu modelo usa 'last_update' o 'last_updated'
-                # Según tu log de SQLAlchemy parece ser 'last_update'
-                if hasattr(caja_db, 'last_update'):
-                    caja_db.last_update = datetime.now()
-            
-            db.commit()
-            
-            # Guardamos el ID del turno en la sesión
-            self.page.session.set("current_shift_id", nuevo_turno.id)
-            
-            # Cerrar diálogo
-            self.page.close(self.dialog)
-            
-            # Ejecutar callback de éxito
-            self.on_complete(tasa_ingresada)
-            
-            # CORRECCIÓN 2: Nueva forma de mostrar SnackBar en Flet
-            self.page.open(ft.SnackBar(ft.Text("Turno abierto y caja sincronizada"), bgcolor="green"))
-            
-        except ValueError:
-            self.page.open(ft.SnackBar(ft.Text("Error: Ingrese montos numéricos válidos"), bgcolor="red"))
-        except Exception as e:
-            db.rollback()
-            # CORRECCIÓN 3: Nueva forma de mostrar SnackBar en Flet
-            self.page.open(ft.SnackBar(ft.Text(f"Error al abrir turno: {e}"), bgcolor="red"))
-        finally:
-            db.close()
+            sesion.add(nuevo_turno)
 
-    def show(self):
-        self.dialog = ft.AlertDialog(
+            # 2. Actualizar la tasa en la tabla de configuración global
+            config_tasa = sesion.query(Configuracion).filter(
+                Configuracion.clave == "exchange_rate"
+            ).first()
+            if config_tasa:
+                config_tasa.valor = str(tasa_ingresada)
+
+            # 3. Sincronizar los saldos físicos de la caja chica
+            caja_bd = sesion.query(Caja).first()
+            if caja_bd:
+                caja_bd.caja_chica_usd       = usd_fisico
+                caja_bd.caja_chica_bs        = bs_fisico
+                caja_bd.ultima_actualizacion = datetime.now()
+
+            sesion.commit()
+
+            # Guardar el ID del turno en la sesión de la página para el cierre posterior
+            self.pagina.session.set("id_turno_actual", nuevo_turno.id)
+
+            self.pagina.close(self.dialogo)
+            self.al_completar(tasa_ingresada)
+            self.pagina.open(ft.SnackBar(
+                ft.Text("Turno abierto y caja sincronizada"),
+                bgcolor=ft.Colors.GREEN_700,
+            ))
+
+        except ValueError:
+            self.pagina.open(ft.SnackBar(
+                ft.Text("Error: Ingrese montos numéricos válidos"),
+                bgcolor=ft.Colors.RED_700,
+            ))
+        except Exception as error:
+            sesion.rollback()
+            self.pagina.open(ft.SnackBar(
+                ft.Text(f"Error al abrir turno: {error}"),
+                bgcolor=ft.Colors.RED_700,
+            ))
+        finally:
+            sesion.close()
+
+    def mostrar(self):
+        """Construye y abre el diálogo de apertura de turno."""
+        self.dialogo = ft.AlertDialog(
             modal=True,
-            title=ft.Row([ft.Icon(ft.Icons.LOCK_OPEN), ft.Text("Apertura de Turno")]),
+            title=ft.Row([
+                ft.Icon(ft.Icons.LOCK_OPEN),
+                ft.Text("Apertura de Turno"),
+            ]),
             content=ft.Container(
                 width=400,
                 content=ft.Column([
-                    ft.Text(f"Bienvenido/a, {self.user['full_name']}", weight="bold", size=18),
-                    ft.Text("Verifique los montos en físico antes de iniciar:", color=ft.Colors.GREY_700),
+                    ft.Text(
+                        f"Bienvenido/a, {self.usuario['nombre_completo']}",
+                        weight="bold", size=18,
+                    ),
+                    ft.Text(
+                        "Verifique los montos en físico antes de iniciar:",
+                        color=ft.Colors.GREY_700,
+                    ),
                     ft.Divider(),
-                    ft.Row([self.usd_field, self.bs_field]),
-                    self.tasa_field,
-                    ft.Text("Al confirmar, se registrará el inicio de su jornada.", 
-                            size=12, italic=True, color=ft.Colors.BLUE_GREY_400)
-                ], tight=True, spacing=15)
+                    ft.Row([self.campo_usd, self.campo_bs]),
+                    self.campo_tasa,
+                    ft.Text(
+                        "Al confirmar se registrará el inicio de su jornada.",
+                        size=12, italic=True, color=ft.Colors.BLUE_GREY_400,
+                    ),
+                ], tight=True, spacing=15),
             ),
             actions=[
-                ft.ElevatedButton("Confirmar y Entrar", 
-                                 icon=ft.Icons.CHECK, 
-                                 on_click=self.confirm_opening,
-                                 bgcolor=ft.Colors.BLUE, color=ft.Colors.WHITE)
-            ]
+                ft.ElevatedButton(
+                    "Confirmar y Entrar",
+                    icon=ft.Icons.CHECK,
+                    on_click=self.confirmar_apertura,
+                    bgcolor=ft.Colors.BLUE, color=ft.Colors.WHITE,
+                ),
+            ],
         )
-        self.page.open(self.dialog)
+        self.pagina.open(self.dialogo)

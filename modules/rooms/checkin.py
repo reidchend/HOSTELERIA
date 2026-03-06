@@ -1,251 +1,330 @@
+# modules/rooms/checkin.py
+
 import flet as ft
 from datetime import datetime, timedelta
-from database.connection import SessionLocal
-from database.models import Room, RoomStatus, Guest, Stay
-from modules.finance.payment_dialog import PaymentDialog
+from database.connection import SesionLocal
+from database.models import Habitacion, EstadoHabitacion, Huesped, Estadia
+from modules.finance.payment_dialog import DialogoPago
 
-class CheckInDialog:
-    def __init__(self, page, room, on_success):
-        self.page = page
-        self.room = room
-        self.on_success = on_success
-        self.dialog = None
-        self.companions_controls = [] 
-        self.current_stay = None 
-        # Variable local para el flujo de pago (no se guarda en la tabla stays)
-        self.calculated_total = 0.0
 
-        # --- CAMPOS DE FECHA ---
-        self.check_in_date = ft.TextField(
+class DialogoCheckIn:
+    """
+    Formulario de check-in para una habitación libre.
+    Permite registrar al huésped titular y sus acompañantes,
+    calcular el total de la estadía y lanzar el módulo de cobro.
+    """
+
+    def __init__(self, pagina: ft.Page, habitacion: Habitacion, al_completar):
+        self.pagina        = pagina
+        self.habitacion    = habitacion
+        self.al_completar  = al_completar
+        self.dialogo       = None
+
+        self.controles_acompanantes  = []
+        self.estadia_actual          = None
+        self.total_calculado         = 0.0
+
+        # ── Campos de fecha ─────────────────────────────────────────────────
+        self.campo_entrada = ft.TextField(
             label="Entrada", value=datetime.now().strftime("%Y-%m-%d"),
-            read_only=True, expand=1, prefix_icon=ft.Icons.LOGIN
+            read_only=True, expand=1, prefix_icon=ft.Icons.LOGIN,
         )
-        tomorrow = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
-        self.check_out_date = ft.TextField(
-            label="Salida Estimada", value=tomorrow, expand=1, 
-            prefix_icon=ft.Icons.LOGOUT, on_submit=lambda _: self.doc_id.focus()
+        manana = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+        self.campo_salida = ft.TextField(
+            label="Salida Estimada", value=manana, expand=1,
+            prefix_icon=ft.Icons.LOGOUT,
+            on_submit=lambda _: self.campo_documento.focus(),
         )
 
-        # --- CAMPOS DEL HUÉSPED TITULAR ---
-        self.doc_id = ft.TextField(
+        # ── Campos del huésped titular ──────────────────────────────────────
+        self.campo_documento    = ft.TextField(
             label="Documento Titular", prefix_icon=ft.Icons.BADGE,
             helper_text="Escriba y pulse Enter para buscar",
-            on_submit=self.search_guest_event
+            on_submit=self.evento_buscar_huesped,
         )
-        self.first_name = ft.TextField(label="Nombres", expand=1)
-        self.last_name = ft.TextField(label="Apellidos", expand=1)
-        self.birth_date = ft.TextField(label="F. Nacimiento", hint_text="YYYY-MM-DD", expand=1)
-        self.nationality = ft.TextField(label="Nacionalidad", value="Venezolano/a", expand=1)
-        self.profession = ft.TextField(label="Profesión", expand=1)
-        self.phone = ft.TextField(label="Teléfono", expand=1)
-        self.vehicle = ft.TextField(label="Vehículo (Placa/Marca)", prefix_icon=ft.Icons.DIRECTIONS_CAR)
-        
-        # --- SECCIÓN ACOMPAÑANTES ---
-        self.companions_list_container = ft.Column(spacing=10)
-        self.btn_add_companion = ft.TextButton(
-            "Añadir Acompañante", 
-            icon=ft.Icons.ADD_REACTION, 
-            on_click=self.add_companion_field
+        self.campo_nombre       = ft.TextField(label="Nombres",       expand=1)
+        self.campo_apellido     = ft.TextField(label="Apellidos",     expand=1)
+        self.campo_fecha_nac    = ft.TextField(label="F. Nacimiento", hint_text="YYYY-MM-DD", expand=1)
+        self.campo_nacionalidad = ft.TextField(label="Nacionalidad",  value="Venezolano/a", expand=1)
+        self.campo_profesion    = ft.TextField(label="Profesión",     expand=1)
+        self.campo_telefono     = ft.TextField(label="Teléfono",      expand=1)
+        self.campo_vehiculo     = ft.TextField(
+            label="Vehículo (Placa/Marca)", prefix_icon=ft.Icons.DIRECTIONS_CAR
         )
 
-        self.btn_save = ft.ElevatedButton(
-            "Registrar Estadía", 
+        # ── Sección de acompañantes ─────────────────────────────────────────
+        self.contenedor_acompanantes = ft.Column(spacing=10)
+        self.btn_agregar_acompanante = ft.TextButton(
+            "Añadir Acompañante",
+            icon=ft.Icons.ADD_REACTION,
+            on_click=self.agregar_campo_acompanante,
+        )
+
+        self.btn_guardar = ft.ElevatedButton(
+            "Registrar Estadía",
             icon=ft.Icons.SAVE,
             style=ft.ButtonStyle(color=ft.Colors.WHITE, bgcolor=ft.Colors.BLUE_800),
-            on_click=self.save_all,
-            height=50
+            on_click=self.guardar_checkin,
+            height=50,
         )
 
-    def search_guest_event(self, e):
-        self.search_guest(e)
-        self.first_name.focus()
+    # ─────────────────────────────────────────────────────────────────────────
+    # BÚSQUEDA DE HUÉSPEDES EXISTENTES
+    # ─────────────────────────────────────────────────────────────────────────
 
-    def search_guest(self, e):
-        if not self.doc_id.value: return
-        db = SessionLocal()
-        guest = db.query(Guest).filter(Guest.document_id == self.doc_id.value).first()
-        if guest:
-            self.first_name.value = guest.first_name
-            self.last_name.value = guest.last_name
-            self.birth_date.value = guest.birth_date.strftime("%Y-%m-%d") if guest.birth_date else ""
-            self.nationality.value = guest.nationality
-            self.profession.value = guest.profession
-            self.phone.value = guest.phone
-            self.vehicle.value = guest.vehicle_info
-            self.page.open(ft.SnackBar(ft.Text(f"Huésped {guest.first_name} cargado"), bgcolor="green"))
-        db.close()
-        self.page.update()
+    def evento_buscar_huesped(self, evento):
+        """Busca el huésped al pulsar Enter en el campo de documento."""
+        self.buscar_huesped(evento)
+        self.campo_nombre.focus()
 
-    def add_companion_field(self, e):
-        # Usamos max_occupancy del modelo Room
-        if len(self.companions_controls) >= (self.room.max_occupancy - 1):
-            self.page.open(ft.SnackBar(ft.Text("Capacidad máxima alcanzada"), bgcolor="orange"))
+    def buscar_huesped(self, evento):
+        """Rellena los campos del titular si el documento ya existe en la BD."""
+        if not self.campo_documento.value:
+            return
+        sesion = SesionLocal()
+        huesped = sesion.query(Huesped).filter(
+            Huesped.documento == self.campo_documento.value
+        ).first()
+        if huesped:
+            self.campo_nombre.value       = huesped.nombre
+            self.campo_apellido.value     = huesped.apellido
+            self.campo_fecha_nac.value    = huesped.fecha_nacimiento.strftime("%Y-%m-%d") if huesped.fecha_nacimiento else ""
+            self.campo_nacionalidad.value = huesped.nacionalidad
+            self.campo_profesion.value    = huesped.profesion
+            self.campo_telefono.value     = huesped.telefono
+            self.campo_vehiculo.value     = huesped.vehiculo
+            self.pagina.open(ft.SnackBar(
+                ft.Text(f"Huésped {huesped.nombre} cargado"), bgcolor="green"
+            ))
+        sesion.close()
+        self.pagina.update()
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # ACOMPAÑANTES
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def agregar_campo_acompanante(self, evento):
+        """Agrega una fila de campos para un nuevo acompañante."""
+        if len(self.controles_acompanantes) >= (self.habitacion.capacidad_maxima - 1):
+            self.pagina.open(ft.SnackBar(
+                ft.Text("Capacidad máxima de huéspedes alcanzada"), bgcolor="orange"
+            ))
             return
 
-        comp_doc = ft.TextField(label="Doc. Acompañante", expand=2, on_submit=self.search_companion_dynamic)
-        comp_name = ft.TextField(label="Nombre", expand=3)
-        comp_last = ft.TextField(label="Apellido", expand=3)
-        
-        row = ft.Row([
-            comp_doc, comp_name, comp_last,
-            ft.IconButton(ft.Icons.DELETE_OUTLINE, icon_color="red", on_click=lambda _: self.remove_companion(row))
+        campo_doc     = ft.TextField(label="Doc. Acompañante", expand=2,
+                                     on_submit=self.buscar_acompanante_dinamico)
+        campo_nombre  = ft.TextField(label="Nombre",   expand=3)
+        campo_apellido= ft.TextField(label="Apellido", expand=3)
+
+        fila = ft.Row([
+            campo_doc, campo_nombre, campo_apellido,
+            ft.IconButton(
+                ft.Icons.DELETE_OUTLINE, icon_color="red",
+                on_click=lambda _, f=None: self.eliminar_acompanante(fila),
+            ),
         ])
-        
-        self.companions_controls.append(row)
-        self.companions_list_container.controls.append(row)
-        self.page.update()
-        comp_doc.focus()
+        # Corregir la referencia circular del botón de eliminar
+        fila.controls[-1].on_click = lambda _, f=fila: self.eliminar_acompanante(f)
 
-    def remove_companion(self, row):
-        self.companions_controls.remove(row)
-        self.companions_list_container.controls.remove(row)
-        self.page.update()
+        self.controles_acompanantes.append(fila)
+        self.contenedor_acompanantes.controls.append(fila)
+        self.pagina.update()
+        campo_doc.focus()
 
-    def search_companion_dynamic(self, e):
-        doc_value = e.control.value
-        if not doc_value: return
-        db = SessionLocal()
-        guest = db.query(Guest).filter(Guest.document_id == doc_value).first()
-        if guest:
-            row_controls = e.control.parent.controls
-            row_controls[1].value = guest.first_name
-            row_controls[2].value = guest.last_name
-        db.close()
-        self.page.update()
+    def eliminar_acompanante(self, fila):
+        """Elimina una fila de acompañante del formulario."""
+        if fila in self.controles_acompanantes:
+            self.controles_acompanantes.remove(fila)
+        if fila in self.contenedor_acompanantes.controls:
+            self.contenedor_acompanantes.controls.remove(fila)
+        self.pagina.update()
 
-    def save_all(self, e):
-        if not self.doc_id.value or not self.first_name.value:
-            self.page.open(ft.SnackBar(ft.Text("Faltan datos del titular"), bgcolor="red"))
+    def buscar_acompanante_dinamico(self, evento):
+        """Rellena nombre y apellido del acompañante si ya está registrado."""
+        doc = evento.control.value
+        if not doc:
+            return
+        sesion = SesionLocal()
+        huesped = sesion.query(Huesped).filter(Huesped.documento == doc).first()
+        if huesped:
+            controles_fila = evento.control.parent.controls
+            controles_fila[1].value = huesped.nombre
+            controles_fila[2].value = huesped.apellido
+        sesion.close()
+        self.pagina.update()
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # GUARDADO DEL CHECK-IN
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def guardar_checkin(self, evento):
+        """
+        Valida los datos, crea/actualiza la ficha del huésped y la estadía,
+        cambia el estado de la habitación a OCUPADA y lanza el módulo de cobro.
+        """
+        if not self.campo_documento.value or not self.campo_nombre.value:
+            self.pagina.open(ft.SnackBar(
+                ft.Text("Faltan datos del titular"), bgcolor="red"
+            ))
             return
 
-        db = SessionLocal()
+        sesion = SesionLocal()
         try:
-            # 1. Procesar Huéspedes
-            main_guest = self.get_or_create_guest(db, self.doc_id.value, self.first_name.value, self.last_name.value, True)
-            guests_list = [main_guest]
-
-            for row in self.companions_controls:
-                doc = row.controls[0].value
-                name = row.controls[1].value
-                last = row.controls[2].value
-                if doc and name:
-                    comp = self.get_or_create_guest(db, doc, name, last, False)
-                    guests_list.append(comp)
-
-            # 2. Actualizar Habitación
-            room_db = db.query(Room).filter(Room.id == self.room.id).first()
-            room_db.status = RoomStatus.OCCUPIED
-            
-            # 3. Calcular Monto (Usando campos reales del modelo Room)
-            d1 = datetime.strptime(self.check_in_date.value, "%Y-%m-%d")
-            d2 = datetime.strptime(self.check_out_date.value, "%Y-%m-%d")
-            nights = max(1, (d2 - d1).days)
-            
-            # Preferimos current_price_usd si existe, sino base_price_usd
-            price_night = room_db.current_price_usd if room_db.current_price_usd else room_db.base_price_usd
-            self.calculated_total = nights * price_night
-            
-            # 4. Crear la Estadía (Solo con campos definidos en class Stay)
-            self.current_stay = Stay(
-                room_id=room_db.id,
-                check_in=d1,
-                check_out=d2,
-                is_active=True,
-                deposit_balance_usd=0.0
+            # 1. Procesar huésped titular y acompañantes
+            titular = self.obtener_o_crear_huesped(
+                sesion, self.campo_documento.value,
+                self.campo_nombre.value, self.campo_apellido.value, es_titular=True,
             )
-            # Vinculamos los huéspedes a través de la relación secondary 'stay_guests'
-            self.current_stay.guests = guests_list
-            
-            db.add(self.current_stay)
-            db.commit()
-            db.refresh(self.current_stay)
-            
-            self.page.close(self.dialog)
-            self.ask_for_payment()
-            
-        except Exception as ex:
-            db.rollback()
-            self.page.open(ft.SnackBar(ft.Text(f"Error en Check-In: {ex}"), bgcolor="red"))
+            lista_huespedes = [titular]
+
+            for fila in self.controles_acompanantes:
+                doc    = fila.controls[0].value
+                nombre = fila.controls[1].value
+                apell  = fila.controls[2].value
+                if doc and nombre:
+                    acomp = self.obtener_o_crear_huesped(sesion, doc, nombre, apell, es_titular=False)
+                    lista_huespedes.append(acomp)
+
+            # 2. Cambiar estado de la habitación a OCUPADA
+            habitacion_bd = sesion.query(Habitacion).filter(
+                Habitacion.id == self.habitacion.id
+            ).first()
+            habitacion_bd.estado = EstadoHabitacion.OCCUPIED
+
+            # 3. Calcular noches y total
+            fecha_entrada = datetime.strptime(self.campo_entrada.value, "%Y-%m-%d")
+            fecha_salida  = datetime.strptime(self.campo_salida.value,  "%Y-%m-%d")
+            noches        = max(1, (fecha_salida - fecha_entrada).days)
+            precio_noche  = (
+                habitacion_bd.precio_actual_usd
+                if habitacion_bd.precio_actual_usd
+                else habitacion_bd.precio_base_usd
+            )
+            self.total_calculado = noches * precio_noche
+
+            # 4. Crear la estadía
+            self.estadia_actual = Estadia(
+                habitacion_id = habitacion_bd.id,
+                entrada       = fecha_entrada,
+                salida        = fecha_salida,
+                activa        = True,
+                deposito_usd  = 0.0,
+            )
+            self.estadia_actual.huespedes = lista_huespedes
+            sesion.add(self.estadia_actual)
+            sesion.commit()
+            sesion.refresh(self.estadia_actual)
+
+            self.pagina.close(self.dialogo)
+            self.preguntar_por_pago()
+
+        except Exception as error:
+            sesion.rollback()
+            self.pagina.open(ft.SnackBar(
+                ft.Text(f"Error en Check-In: {error}"), bgcolor="red"
+            ))
         finally:
-            db.close()
+            sesion.close()
 
-    def ask_for_payment(self):
-        def go_to_payment(e):
-            self.page.close(confirm_dialog)
-            # Se envía el total calculado al diálogo de pagos
-            payment_dialog = PaymentDialog(
-                self.page, 
-                self.current_stay, 
-                self.calculated_total, 
-                on_success=self.on_success
+    def preguntar_por_pago(self):
+        """
+        Muestra un diálogo de confirmación para decidir si cobrar
+        inmediatamente o dejar el pago pendiente.
+        """
+        def ir_a_cobrar(evento):
+            self.pagina.close(dialogo_confirmacion)
+            modulo_pago = DialogoPago(
+                self.pagina,
+                self.estadia_actual,
+                self.total_calculado,
+                al_completar=self.al_completar,
             )
-            payment_dialog.show()
+            modulo_pago.mostrar()
 
-        def skip_payment(e):
-            self.page.close(confirm_dialog)
-            if self.on_success: self.on_success()
+        def omitir_pago(evento):
+            self.pagina.close(dialogo_confirmacion)
+            if self.al_completar:
+                self.al_completar()
 
-        confirm_dialog = ft.AlertDialog(
+        dialogo_confirmacion = ft.AlertDialog(
             modal=True,
             title=ft.Text("Estadía Registrada"),
-            content=ft.Text(f"Total a pagar por {self.room.number}: $ {self.calculated_total:.2f}\n¿Desea registrar el pago ahora?"),
+            content=ft.Text(
+                f"Total estimado Hab. {self.habitacion.numero}: "
+                f"$ {self.total_calculado:.2f}\n¿Desea registrar el pago ahora?"
+            ),
             actions=[
-                ft.TextButton("Omitir", on_click=skip_payment),
-                ft.ElevatedButton("Cobrar", bgcolor=ft.Colors.GREEN_700, color="white", on_click=go_to_payment),
-            ]
+                ft.TextButton("Omitir",  on_click=omitir_pago),
+                ft.ElevatedButton(
+                    "Cobrar", bgcolor=ft.Colors.GREEN_700, color="white",
+                    on_click=ir_a_cobrar,
+                ),
+            ],
         )
-        self.page.open(confirm_dialog)
+        self.pagina.open(dialogo_confirmacion)
 
-    def get_or_create_guest(self, db, doc, fname, lname, is_main):
-        guest = db.query(Guest).filter(Guest.document_id == doc).first()
-        if not guest:
-            guest = Guest(document_id=doc, first_name=fname, last_name=lname)
-            db.add(guest)
+    def obtener_o_crear_huesped(self, sesion, documento, nombre, apellido, es_titular: bool) -> Huesped:
+        """
+        Busca un huésped por documento. Si no existe lo crea.
+        Si es el titular, actualiza también sus datos personales completos.
+        """
+        huesped = sesion.query(Huesped).filter(Huesped.documento == documento).first()
+        if not huesped:
+            huesped = Huesped(documento=documento, nombre=nombre, apellido=apellido)
+            sesion.add(huesped)
         else:
-            guest.first_name = fname
-            guest.last_name = lname
-        
-        if is_main:
-            try:
-                if self.birth_date.value:
-                    guest.birth_date = datetime.strptime(self.birth_date.value, "%Y-%m-%d").date()
-            except: pass
-            guest.nationality = self.nationality.value
-            guest.profession = self.profession.value
-            guest.phone = self.phone.value
-            guest.vehicle_info = self.vehicle.value
-        
-        db.flush()
-        return guest
+            huesped.nombre   = nombre
+            huesped.apellido = apellido
 
-    def build(self):
+        if es_titular:
+            try:
+                if self.campo_fecha_nac.value:
+                    huesped.fecha_nacimiento = datetime.strptime(
+                        self.campo_fecha_nac.value, "%Y-%m-%d"
+                    ).date()
+            except ValueError:
+                pass
+            huesped.nacionalidad = self.campo_nacionalidad.value
+            huesped.profesion    = self.campo_profesion.value
+            huesped.telefono     = self.campo_telefono.value
+            huesped.vehiculo     = self.campo_vehiculo.value
+
+        sesion.flush()  # Asigna el id sin hacer commit todavía
+        return huesped
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # CONSTRUCCIÓN DEL DIÁLOGO
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def construir(self) -> ft.AlertDialog:
         return ft.AlertDialog(
-            title=ft.Text(f"Check-In Habitación {self.room.number}"),
+            title=ft.Text(f"Check-In — Habitación {self.habitacion.numero}"),
             content=ft.Container(
                 width=700,
                 content=ft.Column([
-                    ft.Row([self.check_in_date, self.check_out_date]),
+                    ft.Row([self.campo_entrada, self.campo_salida]),
                     ft.Divider(),
                     ft.Text("Datos del Titular", weight="bold", color="blue"),
-                    self.doc_id,
-                    ft.Row([self.first_name, self.last_name]),
-                    ft.Row([self.birth_date, self.nationality]),
-                    ft.Row([self.profession, self.phone]),
-                    self.vehicle,
+                    self.campo_documento,
+                    ft.Row([self.campo_nombre,    self.campo_apellido]),
+                    ft.Row([self.campo_fecha_nac, self.campo_nacionalidad]),
+                    ft.Row([self.campo_profesion, self.campo_telefono]),
+                    self.campo_vehiculo,
                     ft.Divider(),
                     ft.Row([
                         ft.Text("Acompañantes", weight="bold", color="blue"),
-                        self.btn_add_companion
+                        self.btn_agregar_acompanante,
                     ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
-                    self.companions_list_container,
-                ], scroll=ft.ScrollMode.AUTO, tight=True, spacing=15)
+                    self.contenedor_acompanantes,
+                ], scroll=ft.ScrollMode.AUTO, tight=True, spacing=15),
             ),
             actions=[
-                ft.TextButton("Cancelar", on_click=lambda _: self.page.close(self.dialog)),
-                self.btn_save
-            ]
+                ft.TextButton("Cancelar", on_click=lambda _: self.pagina.close(self.dialogo)),
+                self.btn_guardar,
+            ],
         )
 
-    def show(self):
-        self.dialog = self.build()
-        self.page.open(self.dialog)
+    def mostrar(self):
+        """Construye y abre el diálogo de check-in."""
+        self.dialogo = self.construir()
+        self.pagina.open(self.dialogo)

@@ -1,210 +1,249 @@
+# modules/rooms/management.py
+
 import flet as ft
-from database.models import Room, RoomStatus
-from database.connection import SessionLocal
+from database.models import Habitacion, EstadoHabitacion, Estadia
+from database.connection import SesionLocal
 from sqlalchemy import cast, Integer
 from sqlalchemy.orm import selectinload
-from database.models import Room, Stay
 
-class RoomGrid:
-    def __init__(self, app_state, on_room_click):
-        self.app_state = app_state
-        self.on_room_click = on_room_click
-        self.grid_container = ft.Column(spacing=15, scroll=ft.ScrollMode.AUTO, expand=True)
-        
-        # Crear habitaciones por defecto (Rango 2 al 40)
-        self.create_default_rooms()
-    
-    def build(self):
-        rooms = self.get_rooms()
-        self.grid_container.controls.clear()
-        
-        # 1. Creamos el Row que contendrá las tarjetas
-        grid_layout = ft.Row(
-            controls=[self.create_room_card(room) for room in rooms],
-            spacing=15,          # Espacio horizontal entre tarjetas
-            run_spacing=15,      # Espacio vertical entre filas
-            alignment=ft.MainAxisAlignment.CENTER, # <--- CENTRA LAS TARJETAS EN LA FILA
-            wrap=True,           # Permite que bajen a la siguiente línea
-        )
-        
-        # 2. Envolvemos el Row en un Container para asegurar que ocupe todo el ancho
-        # y permita el centrado real respecto a la pantalla
-        centered_content = ft.Container(
-            content=grid_layout,
-            alignment=ft.alignment.center, # Centra el bloque completo
-            padding=ft.padding.all(20),    # Margen interno para que no peguen a los bordes
-            expand=True
-        )
-        
-        self.grid_container.controls.append(centered_content)
-        return self.grid_container
 
-    def get_rooms(self):
-        db = SessionLocal()
+class GridHabitaciones:
+    """
+    Cuadrícula visual del mapa de habitaciones.
+    Cada habitación se representa como una tarjeta de color según su estado.
+    Al hacer clic en una tarjeta se dispara el callback al_hacer_clic.
+    """
+
+    def __init__(self, estado_app: dict, al_hacer_clic):
+        self.estado_app   = estado_app
+        self.al_hacer_clic = al_hacer_clic
+        self.contenedor_grid = ft.Column(
+            spacing=15, scroll=ft.ScrollMode.AUTO, expand=True
+        )
+        # Poblar con habitaciones por defecto (2–40) si la BD está vacía
+        self.crear_habitaciones_iniciales()
+
+    def construir(self) -> ft.Column:
+        """Construye y retorna la cuadrícula completa con todas las habitaciones."""
+        habitaciones = self.obtener_habitaciones()
+        self.contenedor_grid.controls.clear()
+
+        fila_tarjetas = ft.Row(
+            controls=[self.crear_tarjeta_habitacion(h) for h in habitaciones],
+            spacing=15,
+            run_spacing=15,
+            alignment=ft.MainAxisAlignment.CENTER,
+            wrap=True,
+        )
+
+        bloque_centrado = ft.Container(
+            content=fila_tarjetas,
+            alignment=ft.alignment.center,
+            padding=ft.padding.all(20),
+            expand=True,
+        )
+
+        self.contenedor_grid.controls.append(bloque_centrado)
+        return self.contenedor_grid
+
+    def obtener_habitaciones(self) -> list:
+        """
+        Consulta todas las habitaciones ordenadas numéricamente.
+        Usa eager loading para evitar consultas N+1 al mostrar el huésped activo.
+        """
+        sesion = SesionLocal()
         try:
-            # Usamos Room.active_stays y Stay.guests (Atributos de clase, NO strings)
-            rooms = db.query(Room).options(
-                selectinload(Room.active_stays).selectinload(Stay.guests)
-            ).order_by(cast(Room.number, Integer)).all()
-            return rooms
-        except Exception as e:
-            print(f"❌ Error en get_rooms: {e}")
-            # Fallback simple si el eager loading falla
-            return db.query(Room).order_by(cast(Room.number, Integer)).all()
+            habitaciones = (
+                sesion.query(Habitacion)
+                .options(
+                    selectinload(Habitacion.estadias_activas)
+                    .selectinload(Estadia.huespedes)
+                )
+                .order_by(cast(Habitacion.numero, Integer))
+                .all()
+            )
+            return habitaciones
+        except Exception as error:
+            print(f"❌ Error en obtener_habitaciones: {error}")
+            # Fallback sin eager loading si falla
+            return sesion.query(Habitacion).order_by(cast(Habitacion.numero, Integer)).all()
         finally:
-            db.close()
-    
-    def create_room_card(self, room):
-        """Crea la tarjeta visual de la habitación con diseño armónico y profesional"""
+            sesion.close()
+
+    def crear_tarjeta_habitacion(self, habitacion: Habitacion) -> ft.Container:
+        """
+        Crea la tarjeta visual de una habitación.
+        El color y el ícono cambian según el estado (libre, ocupada, limpieza, etc.).
+        """
         try:
-            # 1. Configuración de estilos por estado
-            status_configs = {
-                RoomStatus.FREE: {
-                    "bg": ft.Colors.GREEN_50, "accent": ft.Colors.GREEN_700, 
-                    "icon": ft.Icons.BED_OUTLINED, "label": "DISPONIBLE"
+            # Configuración de estilo por cada estado posible
+            estilos_por_estado = {
+                EstadoHabitacion.FREE: {
+                    "fondo":  ft.Colors.GREEN_50,
+                    "acento": ft.Colors.GREEN_700,
+                    "icono":  ft.Icons.BED_OUTLINED,
+                    "etiqueta": "DISPONIBLE",
                 },
-                RoomStatus.OCCUPIED: {
-                    "bg": ft.Colors.RED_50, "accent": ft.Colors.RED_800, 
-                    "icon": ft.Icons.PERSON, "label": "OCUPADA"
+                EstadoHabitacion.OCCUPIED: {
+                    "fondo":  ft.Colors.RED_50,
+                    "acento": ft.Colors.RED_800,
+                    "icono":  ft.Icons.PERSON,
+                    "etiqueta": "OCUPADA",
                 },
-                RoomStatus.RESERVED: {
-                    "bg": ft.Colors.AMBER_50, "accent": ft.Colors.AMBER_800, 
-                    "icon": ft.Icons.EVENT_AVAILABLE, "label": "RESERVADA"
+                EstadoHabitacion.RESERVED: {
+                    "fondo":  ft.Colors.AMBER_50,
+                    "acento": ft.Colors.AMBER_800,
+                    "icono":  ft.Icons.EVENT_AVAILABLE,
+                    "etiqueta": "RESERVADA",
                 },
-                RoomStatus.CLEANING: {
-                    "bg": ft.Colors.CYAN_50, "accent": ft.Colors.CYAN_800, 
-                    "icon": ft.Icons.CLEANING_SERVICES, "label": "LIMPIEZA"
+                EstadoHabitacion.CLEANING: {
+                    "fondo":  ft.Colors.CYAN_50,
+                    "acento": ft.Colors.CYAN_800,
+                    "icono":  ft.Icons.CLEANING_SERVICES,
+                    "etiqueta": "LIMPIEZA",
                 },
-                RoomStatus.MAINTENANCE: {
-                    "bg": ft.Colors.BLUE_GREY_50, "accent": ft.Colors.BLUE_GREY_800, 
-                    "icon": ft.Icons.BUILD_CIRCLE_OUTLINED, "label": "MTTO"
+                EstadoHabitacion.MAINTENANCE: {
+                    "fondo":  ft.Colors.BLUE_GREY_50,
+                    "acento": ft.Colors.BLUE_GREY_800,
+                    "icono":  ft.Icons.BUILD_CIRCLE_OUTLINED,
+                    "etiqueta": "MTTO",
                 },
             }
-            
-            style = status_configs.get(room.status, status_configs[RoomStatus.FREE])
-            
-            # 2. Lógica de contenido
-            guest_name = "---"
-            if room.status == RoomStatus.OCCUPIED:
-                guest_name = getattr(room, 'current_guest_name', "Huésped Activo")
+
+            estilo = estilos_por_estado.get(habitacion.estado, estilos_por_estado[EstadoHabitacion.FREE])
+
+            # Nombre del huésped solo si la habitación está ocupada
+            nombre_huesped = "---"
+            if habitacion.estado == EstadoHabitacion.OCCUPIED:
+                nombre_huesped = getattr(habitacion, 'nombre_huesped_actual', "Huésped")
 
             return ft.Container(
                 width=130,
                 height=150,
                 bgcolor=ft.Colors.WHITE,
-                border=ft.border.all(1.5, style["accent"] if room.status != RoomStatus.FREE else ft.Colors.GREY_200),
+                border=ft.border.all(
+                    1.5,
+                    estilo["acento"] if habitacion.estado != EstadoHabitacion.FREE
+                    else ft.Colors.GREY_200,
+                ),
                 border_radius=12,
                 ink=True,
-                on_click=lambda _: self.on_room_click(room),
-                
-                # --- AGREGANDO SOMBRA PARA VOLUMEN ---
+                on_click=lambda _, h=habitacion: self.al_hacer_clic(h),
+                on_hover=lambda e, ac=estilo["acento"]: self.al_pasar_cursor(e, ac),
                 shadow=ft.BoxShadow(
                     spread_radius=1,
                     blur_radius=3,
-                    color=ft.Colors.BLACK12, # Sombra sutil
-                    offset=ft.Offset(1, 4),   # Desplazada hacia abajo para dar altura
+                    color=ft.Colors.BLACK12,
+                    offset=ft.Offset(1, 4),
                 ),
-                
-                # --- EFECTO VISUAL AL PASAR EL MOUSE ---
-                on_hover=lambda e: self.on_card_hover(e, style["accent"]),
-                
                 content=ft.Stack([
-                    # Capa de fondo sutil para el estado
-                    ft.Container(bgcolor=style["bg"], border_radius=12),
-                    
-                    # Contenido Principal
+                    # Capa de color de fondo según estado
+                    ft.Container(bgcolor=estilo["fondo"], border_radius=12),
+                    # Contenido principal de la tarjeta
                     ft.Column([
-                        # Fila superior (Número y Badge de Tipo)
+                        # Fila superior: número y tipo
                         ft.Container(
                             padding=ft.padding.only(left=10, right=10, top=10),
                             content=ft.Row([
-                                ft.Text(f"{room.number}", size=20, weight=ft.FontWeight.W_800, color=style["accent"]),
+                                ft.Text(
+                                    f"{habitacion.numero}", size=20,
+                                    weight=ft.FontWeight.W_800, color=estilo["acento"],
+                                ),
                                 ft.Container(
-                                    content=ft.Text(room.type.upper(), size=7, weight=ft.FontWeight.BOLD, color=ft.Colors.BLACK54),
-                                    bgcolor=ft.Colors.with_opacity(0.1, style["accent"]),
+                                    content=ft.Text(
+                                        habitacion.tipo.upper(), size=7,
+                                        weight=ft.FontWeight.BOLD, color=ft.Colors.BLACK54,
+                                    ),
+                                    bgcolor=ft.Colors.with_opacity(0.1, estilo["acento"]),
                                     padding=ft.padding.symmetric(horizontal=5, vertical=2),
-                                    border_radius=5
-                                )
-                            ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN)
+                                    border_radius=5,
+                                ),
+                            ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
                         ),
-                        
-                        # Icono Central
+                        # Ícono central y nombre del huésped
                         ft.Container(
                             expand=True,
                             alignment=ft.alignment.center,
                             content=ft.Column([
-                                ft.Icon(style["icon"], color=style["accent"], size=28),
+                                ft.Icon(estilo["icono"], color=estilo["acento"], size=28),
                                 ft.Text(
-                                    guest_name.upper(), 
-                                    size=9, 
-                                    weight=ft.FontWeight.BOLD, 
-                                    color=ft.Colors.BLACK87,
+                                    nombre_huesped.upper(), size=9,
+                                    weight=ft.FontWeight.BOLD, color=ft.Colors.BLACK87,
                                     text_align=ft.TextAlign.CENTER,
                                     max_lines=1,
-                                    overflow=ft.TextOverflow.ELLIPSIS
-                                )
-                            ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=2)
+                                    overflow=ft.TextOverflow.ELLIPSIS,
+                                ),
+                            ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=2),
                         ),
-                        
                         # Barra de estado inferior
                         ft.Container(
                             width=130,
-                            bgcolor=style["accent"],
+                            bgcolor=estilo["acento"],
                             padding=ft.padding.all(4),
                             border_radius=ft.border_radius.only(bottom_left=10, bottom_right=10),
                             content=ft.Text(
-                                style["label"], 
-                                size=9, 
-                                weight=ft.FontWeight.W_700, 
-                                color=ft.Colors.WHITE, 
-                                text_align=ft.TextAlign.CENTER
-                            )
-                        )
-                    ], spacing=0)
-                ])
+                                estilo["etiqueta"], size=9,
+                                weight=ft.FontWeight.W_700,
+                                color=ft.Colors.WHITE,
+                                text_align=ft.TextAlign.CENTER,
+                            ),
+                        ),
+                    ], spacing=0),
+                ]),
             )
-        except Exception as e:
-            print(f"❌ Error en card {room.number}: {e}")
-            return ft.Container(width=130, height=150, bgcolor="red", content=ft.Text("Error"))
 
-    def create_default_rooms(self):
-        """Crea habitaciones del 2 al 40 si no existen"""
-        db = SessionLocal()
+        except Exception as error:
+            print(f"❌ Error al crear tarjeta Hab. {habitacion.numero}: {error}")
+            return ft.Container(
+                width=130, height=150, bgcolor=ft.Colors.RED_100,
+                content=ft.Text("Error", color=ft.Colors.RED_900),
+            )
+
+    def crear_habitaciones_iniciales(self):
+        """
+        Crea las habitaciones del 2 al 40 con tipos y precios predeterminados.
+        Solo se ejecuta si la tabla de habitaciones está vacía.
+        """
+        sesion = SesionLocal()
         try:
-            if db.query(Room).count() > 0:
-                return
-            
-            types = ["Estándar", "Doble", "Suite", "Familiar"]
+            if sesion.query(Habitacion).count() > 0:
+                return  # Ya hay habitaciones, no hace falta crear
+
+            tipos  = ["Estándar", "Doble", "Suite", "Familiar"]
+            precios = {"Estándar": 50.0, "Doble": 75.0, "Suite": 120.0, "Familiar": 90.0}
+
             for i in range(2, 41):
-                room_type = types[i % len(types)]
-                new_room = Room(
-                    number=str(i),
-                    floor=(i // 10) + 1,
-                    type=room_type,
-                    status=RoomStatus.FREE,
-                    base_price_usd=50.0,
-                    current_price_usd=50.0,
-                    max_occupancy=2,
-                    description=f"Habitación {i}"
-                )
-                db.add(new_room)
-            db.commit()
-            print("✅ Habitaciones 2-40 creadas")
-        except Exception as e:
-            print(f"Error: {e}")
-            db.rollback()
+                tipo_hab = tipos[i % len(tipos)]
+                sesion.add(Habitacion(
+                    numero           = str(i),
+                    piso             = (i // 10) + 1,
+                    tipo             = tipo_hab,
+                    estado           = EstadoHabitacion.FREE,
+                    precio_base_usd  = precios.get(tipo_hab, 50.0),
+                    precio_actual_usd= precios.get(tipo_hab, 50.0),
+                    capacidad_maxima = 4 if tipo_hab == "Familiar" else 2,
+                    descripcion      = f"Habitación {i}",
+                ))
+            sesion.commit()
+            print("✅ Habitaciones 2–40 creadas correctamente")
+
+        except Exception as error:
+            print(f"❌ Error al crear habitaciones: {error}")
+            sesion.rollback()
         finally:
-            db.close()
+            sesion.close()
 
-
-    def on_card_hover(self, e, accent_color):
-        """Efecto de elevación cuando el mouse entra en la tarjeta"""
-        e.control.shadow = ft.BoxShadow(
+    def al_pasar_cursor(self, evento, color_acento):
+        """Aplica efecto de elevación al pasar el cursor sobre una tarjeta."""
+        evento.control.shadow = ft.BoxShadow(
             spread_radius=1,
             blur_radius=3,
-            color=ft.Colors.with_opacity(0.2, accent_color) if e.data == "true" else ft.Colors.BLACK12,
-            offset=ft.Offset(2, 5) if e.data == "true" else ft.Offset(1, 4)
+            color=(
+                ft.Colors.with_opacity(0.2, color_acento)
+                if evento.data == "true"
+                else ft.Colors.BLACK12
+            ),
+            offset=ft.Offset(2, 5) if evento.data == "true" else ft.Offset(1, 4),
         )
-        # Un pequeño zoom al entrar
-        e.control.scale = 1.03 if e.data == "true" else 1.0
-        e.control.update()
+        evento.control.scale = 1.03 if evento.data == "true" else 1.0
+        evento.control.update()

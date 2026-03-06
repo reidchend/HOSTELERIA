@@ -1,135 +1,194 @@
+# modules/finance/shift_closing.py
+
 import flet as ft
-from database.connection import SessionLocal
-from database.models import Shift, Payment, CashDrawer, User
 from datetime import datetime
+from database.connection import SesionLocal
+from database.models import Turno, Pago, Caja
 
-class ShiftClosingDialog:
-    def __init__(self, page, shift_id, on_close_complete):
-        self.page = page
-        self.shift_id = shift_id
-        self.on_close_complete = on_close_complete
-        
-        # 1. Obtener datos del sistema para el cálculo
-        self.summary = self.calculate_system_balances()
-        
-        # 2. Campos de entrada para el conteo físico
-        self.physical_main_usd = ft.TextField(
-            label="Monto Físico Caja Principal ($)", 
-            prefix_text="$ ", value="0", on_change=self.check_differences
+
+class DialogoCierreTurno:
+    """
+    Diálogo de cierre de turno.
+    Muestra el resumen calculado por el sistema (ventas netas y fondo de caja chica),
+    pide el conteo físico del recepcionista y registra las diferencias al cerrar.
+    """
+
+    def __init__(self, pagina: ft.Page, id_turno: int, al_cerrar_turno):
+        self.pagina         = pagina
+        self.id_turno       = id_turno
+        self.al_cerrar_turno = al_cerrar_turno
+        self.dialogo        = None
+
+        # Calcular los saldos esperados por el sistema antes de construir la UI
+        self.resumen = self.calcular_saldos_sistema()
+
+        # Campos de conteo físico
+        self.campo_principal_usd = ft.TextField(
+            label="Monto Físico Caja Principal ($)",
+            prefix_text="$ ", value="0",
+            on_change=self.revisar_diferencias,
         )
-        self.physical_petty_usd = ft.TextField(
-            label="Monto Físico Caja Chica ($)", 
-            prefix_text="$ ", value="0", on_change=self.check_differences
+        self.campo_chica_usd = ft.TextField(
+            label="Monto Físico Caja Chica ($)",
+            prefix_text="$ ", value="0",
+            on_change=self.revisar_diferencias,
         )
-        
-        # 3. Etiquetas de diferencia
-        self.diff_main_text = ft.Text("Diferencia: $ 0.00", color=ft.Colors.GREY)
-        self.diff_petty_text = ft.Text("Diferencia: $ 0.00", color=ft.Colors.GREY)
 
-    def calculate_system_balances(self):
-        db = SessionLocal()
-        shift = db.get(Shift, self.shift_id)  # SQLAlchemy 2.x: db.get() reemplaza query().get()
-        # Sumar pagos de este turno (Caja Principal)
-        payments = db.query(Payment).filter(
-            Payment.created_at >= shift.start_time,
-            Payment.is_refund == False
-        ).all()
-        # Sumar vueltos por tipo de caja
-        refunds_main = db.query(Payment).filter(
-            Payment.created_at >= shift.start_time,
-            Payment.is_refund == True,
-            Payment.description.contains("main")
-        ).all()
-        refunds_petty = db.query(Payment).filter(
-            Payment.created_at >= shift.start_time,
-            Payment.is_refund == True,
-            Payment.description.contains("petty")
-        ).all()
-        
-        db.close()
-        
-        total_in = sum(p.amount_usd for p in payments)
-        total_out_main = sum(r.amount_usd for r in refunds_main)
-        total_out_petty = sum(r.amount_usd for r in refunds_petty)
-        
-        return {
-            "expected_main": total_in - total_out_main,
-            "expected_petty": shift.initial_usd - total_out_petty, # Asumiendo initial_usd como fondo de caja chica
-        }
+        # Etiquetas de diferencia (se actualizan mientras escribe)
+        self.texto_diferencia_principal = ft.Text("Diferencia: $ 0.00", color=ft.Colors.GREY)
+        self.texto_diferencia_chica     = ft.Text("Diferencia: $ 0.00", color=ft.Colors.GREY)
 
-    def check_differences(self, _):
+    # ─────────────────────────────────────────────────────────────────────────
+    # CÁLCULO DEL SISTEMA
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def calcular_saldos_sistema(self) -> dict:
+        """
+        Suma todos los pagos cobrados durante el turno y los vueltos entregados
+        para calcular lo que el sistema espera encontrar en cada caja.
+        """
+        sesion = SesionLocal()
         try:
-            p_main = float(self.physical_main_usd.value or 0)
-            p_petty = float(self.physical_petty_usd.value or 0)
-            
-            diff_m = p_main - self.summary["expected_main"]
-            diff_p = p_petty - self.summary["expected_petty"]
-            
-            self.diff_main_text.value = f"Diferencia: $ {diff_m:.2f}"
-            self.diff_main_text.color = ft.Colors.RED if diff_m < 0 else ft.Colors.GREEN
-            
-            self.diff_petty_text.value = f"Diferencia: $ {diff_p:.2f}"
-            self.diff_petty_text.color = ft.Colors.RED if diff_p < 0 else ft.Colors.GREEN
-            
-            self.page.update()
-        except: pass
+            turno = sesion.get(Turno, self.id_turno)
 
-    def finalize_shift(self, _):
-        db = SessionLocal()
-        try:
-            shift = db.get(Shift, self.shift_id)  # SQLAlchemy 2.x: db.get() reemplaza query().get()
-            shift.end_time = datetime.now()
-            shift.final_usd_expected = self.summary["expected_main"]
-            shift.final_usd_real = float(self.physical_main_usd.value)
-            shift.is_active = False
-            
-            # Actualizar la caja física en la DB para el siguiente turno
-            caja = db.query(CashDrawer).first()
-            # La principal se suele retirar (dejar en 0), la chica se mantiene o repone
-            caja.main_balance_usd = 0 
-            caja.petty_cash_usd = float(self.physical_petty_usd.value)
-            
-            db.commit()
-            self.page.close(self.dialog)
-            self.on_close_complete()
-            
-        except Exception as e:
-            db.rollback()
-            self.page.open(ft.SnackBar(ft.Text(f"Error: {e}")))  # API correcta en Flet moderno
+            cobros = sesion.query(Pago).filter(
+                Pago.creado_en >= turno.hora_inicio,
+                Pago.es_devolucion == False,
+            ).all()
+
+            devoluciones_principal = sesion.query(Pago).filter(
+                Pago.creado_en >= turno.hora_inicio,
+                Pago.es_devolucion == True,
+                Pago.descripcion.contains("principal"),
+            ).all()
+
+            devoluciones_chica = sesion.query(Pago).filter(
+                Pago.creado_en >= turno.hora_inicio,
+                Pago.es_devolucion == True,
+                Pago.descripcion.contains("chica"),
+            ).all()
+
+            ingresos_usd     = sum(p.monto_usd for p in cobros)
+            salidas_principal = sum(r.monto_usd for r in devoluciones_principal)
+            salidas_chica     = sum(r.monto_usd for r in devoluciones_chica)
+
+            return {
+                "esperado_principal": ingresos_usd - salidas_principal,
+                "esperado_chica":     turno.inicial_usd - salidas_chica,
+            }
         finally:
-            db.close()
+            sesion.close()
 
-    def show(self):
-        self.dialog = ft.AlertDialog(
-            title=ft.Row([ft.Icon(ft.Icons.LOCK), ft.Text("Cierre de Turno")]),
+    # ─────────────────────────────────────────────────────────────────────────
+    # REVISIÓN EN TIEMPO REAL
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def revisar_diferencias(self, evento):
+        """Compara el conteo físico ingresado con el saldo esperado del sistema."""
+        try:
+            fisico_principal = float(self.campo_principal_usd.value or 0)
+            fisico_chica     = float(self.campo_chica_usd.value     or 0)
+
+            diff_principal = fisico_principal - self.resumen["esperado_principal"]
+            diff_chica     = fisico_chica     - self.resumen["esperado_chica"]
+
+            self.texto_diferencia_principal.value = f"Diferencia: $ {diff_principal:.2f}"
+            self.texto_diferencia_principal.color = (
+                ft.Colors.RED_700 if diff_principal < 0 else ft.Colors.GREEN_700
+            )
+
+            self.texto_diferencia_chica.value = f"Diferencia: $ {diff_chica:.2f}"
+            self.texto_diferencia_chica.color = (
+                ft.Colors.RED_700 if diff_chica < 0 else ft.Colors.GREEN_700
+            )
+
+            self.pagina.update()
+        except Exception:
+            pass
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # CIERRE DEL TURNO
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def finalizar_turno(self, evento):
+        """
+        Marca el turno como cerrado, registra el conteo real del recepcionista
+        y pone la caja principal en $0 (el dinero se entrega a administración).
+        """
+        sesion = SesionLocal()
+        try:
+            turno = sesion.get(Turno, self.id_turno)
+            turno.hora_fin     = datetime.now()
+            turno.usd_esperado = self.resumen["esperado_principal"]
+            turno.usd_real     = float(self.campo_principal_usd.value)
+            turno.activo       = False
+
+            # La caja principal queda en $0 tras la entrega a administración.
+            # La caja chica mantiene el conteo físico para el siguiente turno.
+            caja = sesion.query(Caja).first()
+            caja.saldo_principal_usd  = 0.0
+            caja.caja_chica_usd       = float(self.campo_chica_usd.value)
+            caja.ultima_actualizacion = datetime.now()
+
+            sesion.commit()
+            self.pagina.close(self.dialogo)
+            if self.al_cerrar_turno:
+                self.al_cerrar_turno()
+
+        except Exception as error:
+            sesion.rollback()
+            self.pagina.open(ft.SnackBar(
+                ft.Text(f"Error al cerrar el turno: {error}"),
+                bgcolor=ft.Colors.RED_700,
+            ))
+        finally:
+            sesion.close()
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # CONSTRUCCIÓN DEL DIÁLOGO
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def mostrar(self):
+        """Construye y abre el diálogo de cierre de turno."""
+        self.dialogo = ft.AlertDialog(
+            title=ft.Row([
+                ft.Icon(ft.Icons.LOCK),
+                ft.Text("Cierre de Turno"),
+            ]),
             content=ft.Container(
                 width=450,
                 content=ft.Column([
                     ft.Text("Resumen del Sistema", weight="bold"),
                     ft.ListTile(
-                        title=ft.Text(f"Ventas a Entregar: $ {self.summary['expected_main']:.2f}"),
+                        title=ft.Text(
+                            f"Ventas a Entregar: $ {self.resumen['esperado_principal']:.2f}"
+                        ),
                         subtitle=ft.Text("Caja Principal (Ventas Netas)"),
-                        leading=ft.Icon(ft.Icons.MONETIZATION_ON, color=ft.Colors.GREEN)
+                        leading=ft.Icon(ft.Icons.MONETIZATION_ON, color=ft.Colors.GREEN),
                     ),
                     ft.ListTile(
-                        title=ft.Text(f"Fondo en Caja Chica: $ {self.summary['expected_petty']:.2f}"),
+                        title=ft.Text(
+                            f"Fondo en Caja Chica: $ {self.resumen['esperado_chica']:.2f}"
+                        ),
                         subtitle=ft.Text("Debe permanecer en el hotel"),
-                        leading=ft.Icon(ft.Icons.ACCOUNT_BALANCE_WALLET, color=ft.Colors.BLUE)
+                        leading=ft.Icon(ft.Icons.ACCOUNT_BALANCE_WALLET, color=ft.Colors.BLUE),
                     ),
                     ft.Divider(),
                     ft.Text("Conteo Físico en Efectivo", weight="bold"),
-                    self.physical_main_usd,
-                    self.diff_main_text,
-                    self.physical_petty_usd,
-                    self.diff_petty_text,
-                ], tight=True, spacing=10)
+                    self.campo_principal_usd,
+                    self.texto_diferencia_principal,
+                    self.campo_chica_usd,
+                    self.texto_diferencia_chica,
+                ], tight=True, spacing=10),
             ),
             actions=[
-                ft.TextButton("Cancelar", on_click=lambda _: self.page.close(self.dialog)),
-                ft.ElevatedButton("Cerrar Turno y Salir", 
-                                 icon=ft.Icons.SAVE_ALT,
-                                 bgcolor=ft.Colors.RED_800, color=ft.Colors.WHITE,
-                                 on_click=self.finalize_shift)
-            ]
+                ft.TextButton("Cancelar", on_click=lambda _: self.pagina.close(self.dialogo)),
+                ft.ElevatedButton(
+                    "Cerrar Turno y Salir",
+                    icon=ft.Icons.SAVE_ALT,
+                    bgcolor=ft.Colors.RED_800, color=ft.Colors.WHITE,
+                    on_click=self.finalizar_turno,
+                ),
+            ],
         )
-        self.page.open(self.dialog)
+        self.pagina.open(self.dialogo)

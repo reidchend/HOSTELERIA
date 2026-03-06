@@ -1,25 +1,34 @@
-import flet as ft
-from database.connection import SessionLocal
-from database.models import User
-from utils.helpers import verify_password
+# modules/auth/login.py
 
-class LoginScreen:
-    def __init__(self, page, on_login_success):
-        self.page = page
-        self.on_login_success = on_login_success
-        
-        # Campo para mensajes de error (¡IMPORTANTE!)
-        self.message = ft.Text(value="", size=14, text_align=ft.TextAlign.CENTER)
-        
-        self.username = ft.TextField(
+import flet as ft
+from database.connection import SesionLocal
+from database.models import Usuario
+from utils.helpers import verificar_contrasena
+
+
+class PantallaLogin:
+    """
+    Pantalla de inicio de sesión.
+    Muestra un formulario centrado con gradiente de fondo.
+    Al autenticarse correctamente, invoca al_iniciar_sesion con los datos del usuario.
+    """
+
+    def __init__(self, pagina: ft.Page, al_iniciar_sesion):
+        self.pagina           = pagina
+        self.al_iniciar_sesion = al_iniciar_sesion
+
+        # Texto de retroalimentación (errores o confirmación)
+        self.mensaje = ft.Text(value="", size=14, text_align=ft.TextAlign.CENTER)
+
+        self.campo_usuario = ft.TextField(
             label="Usuario",
             prefix_icon=ft.Icons.PERSON_OUTLINED,
             border_radius=15,
             bgcolor=ft.Colors.WHITE,
             focused_border_color=ft.Colors.BLUE_ACCENT,
-            on_submit=self.login # Permite entrar con la tecla Enter
+            on_submit=self.iniciar_sesion,
         )
-        self.password = ft.TextField(
+        self.campo_contrasena = ft.TextField(
             label="Contraseña",
             prefix_icon=ft.Icons.LOCK_OUTLINED,
             password=True,
@@ -27,56 +36,52 @@ class LoginScreen:
             border_radius=15,
             bgcolor=ft.Colors.WHITE,
             focused_border_color=ft.Colors.BLUE_ACCENT,
-            on_submit=self.login
+            on_submit=self.iniciar_sesion,
         )
 
-    def build(self):
-        # Contenedor con gradiente que ocupa TODO
+    def construir(self) -> ft.Container:
+        """Construye y retorna el árbol de widgets de la pantalla de login."""
         return ft.Container(
-            content=ft.Column([
-                # Tarjeta de Login
-                ft.Container(
-                    content=ft.Column([
-                        ft.Icon(ft.Icons.HOTEL_ROUNDED, size=50, color=ft.Colors.BLUE_ACCENT),
-                        ft.Text("Bienvenido", size=30, weight=ft.FontWeight.BOLD, color=ft.Colors.BLUE_900),
-                        ft.Text("Inicia sesión para continuar", color=ft.Colors.GREY_600, size=14),
-                        
-                        ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
-                        
-                        self.username,
-                        self.password,
-                        
-                        # Aquí aparecerá el error
-                        self.message, 
-                        
-                        ft.Divider(height=5, color=ft.Colors.TRANSPARENT),
-                        
-                        ft.ElevatedButton(
-                            text="INGRESAR",
-                            style=ft.ButtonStyle(
-                                color=ft.Colors.WHITE,
-                                bgcolor=ft.Colors.BLUE_ACCENT,
-                                shape=ft.RoundedRectangleBorder(radius=12),
-                                padding=20,
-                            ),
-                            width=300,
-                            on_click=self.login
+            content=ft.Column(
+                [
+                    ft.Container(
+                        content=ft.Column(
+                            [
+                                ft.Icon(ft.Icons.HOTEL_ROUNDED, size=50, color=ft.Colors.BLUE_ACCENT),
+                                ft.Text("Bienvenido", size=30, weight=ft.FontWeight.BOLD,
+                                        color=ft.Colors.BLUE_900),
+                                ft.Text("Inicia sesión para continuar",
+                                        color=ft.Colors.GREY_600, size=14),
+                                ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
+                                self.campo_usuario,
+                                self.campo_contrasena,
+                                self.mensaje,
+                                ft.Divider(height=5, color=ft.Colors.TRANSPARENT),
+                                ft.ElevatedButton(
+                                    text="INGRESAR",
+                                    style=ft.ButtonStyle(
+                                        color=ft.Colors.WHITE,
+                                        bgcolor=ft.Colors.BLUE_ACCENT,
+                                        shape=ft.RoundedRectangleBorder(radius=12),
+                                        padding=20,
+                                    ),
+                                    width=300,
+                                    on_click=self.iniciar_sesion,
+                                ),
+                            ],
+                            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                            spacing=15,
                         ),
-                    ], 
-                    horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                    spacing=15
-                    ),
-                    bgcolor=ft.Colors.with_opacity(0.9, ft.Colors.WHITE),
-                    padding=40,
-                    border_radius=30,
-                    shadow=ft.BoxShadow(blur_radius=20, color=ft.Colors.BLACK26),
-                    width=400,
-                ),
-            ], 
-            alignment=ft.MainAxisAlignment.CENTER,
-            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                        bgcolor=ft.Colors.with_opacity(0.9, ft.Colors.WHITE),
+                        padding=40,
+                        border_radius=30,
+                        shadow=ft.BoxShadow(blur_radius=20, color=ft.Colors.BLACK26),
+                        width=400,
+                    )
+                ],
+                alignment=ft.MainAxisAlignment.CENTER,
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
             ),
-            # Estas 3 líneas obligan al gradiente a cubrir todo
             expand=True,
             alignment=ft.alignment.center,
             gradient=ft.LinearGradient(
@@ -86,38 +91,44 @@ class LoginScreen:
             ),
         )
 
-    def login(self, e):
-        """Maneja el evento de login"""
-        if not self.username.value or not self.password.value:
-            self.message.value = "Por favor ingrese credenciales"
-            self.message.color = ft.Colors.RED_600
-            self.page.update()
+    def iniciar_sesion(self, evento):
+        """
+        Valida las credenciales contra la base de datos.
+        Si son correctas, pasa los datos del usuario al callback al_iniciar_sesion.
+        """
+        if not self.campo_usuario.value or not self.campo_contrasena.value:
+            self.mensaje.value = "Por favor ingrese sus credenciales"
+            self.mensaje.color = ft.Colors.RED_600
+            self.pagina.update()
             return
-        
-        db = SessionLocal()
+
+        sesion = SesionLocal()
         try:
-            user = db.query(User).filter(
-                User.username == self.username.value,
-                User.is_active == True
+            usuario = sesion.query(Usuario).filter(
+                Usuario.nombre_usuario == self.campo_usuario.value,
+                Usuario.activo == True
             ).first()
-            
-            if user and verify_password(self.password.value, user.password_hash):
-                self.message.value = "¡Acceso concedido!"
-                self.message.color = ft.Colors.GREEN_600
-                self.page.update()
-                
-                self.on_login_success({
-                    "id": user.id,
-                    "username": user.username,
-                    "full_name": user.full_name,
-                    "role": user.role.value if hasattr(user.role, 'value') else user.role,
+
+            if usuario and verificar_contrasena(self.campo_contrasena.value, usuario.hash_contrasena):
+                self.mensaje.value = "¡Acceso concedido!"
+                self.mensaje.color = ft.Colors.GREEN_600
+                self.pagina.update()
+
+                # Pasar solo los datos necesarios (no el objeto ORM) para evitar sesiones detached
+                self.al_iniciar_sesion({
+                    "id":              usuario.id,
+                    "nombre_usuario":  usuario.nombre_usuario,
+                    "nombre_completo": usuario.nombre_completo,
+                    "rol":             usuario.rol.value if hasattr(usuario.rol, 'value') else usuario.rol,
                 })
             else:
-                self.message.value = "Usuario o contraseña incorrectos"
-                self.message.color = ft.Colors.RED_600
-                self.page.update()
-        except Exception as ex:
-            self.message.value = f"Error de conexión: {str(ex)}"
-            self.page.update()
+                self.mensaje.value = "Usuario o contraseña incorrectos"
+                self.mensaje.color = ft.Colors.RED_600
+                self.pagina.update()
+
+        except Exception as error:
+            self.mensaje.value = f"Error de conexión: {str(error)}"
+            self.mensaje.color = ft.Colors.RED_600
+            self.pagina.update()
         finally:
-            db.close()
+            sesion.close()

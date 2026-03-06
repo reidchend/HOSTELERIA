@@ -1,118 +1,130 @@
 """
-Script para reiniciar la base de datos a su estado inicial
-Ejecutar: python setup.py
+setup.py
+Script de inicialización / reinicio de la base de datos.
+Elimina y recrea todas las tablas con los datos de prueba iniciales.
+
+Uso:
+    python setup.py
 """
 
-from database.connection import engine, Base
-# Importamos todos los modelos incluyendo Shift para que se cree la tabla
+from database.connection import motor, Base
 from database.models import (
-    User, Room, Configuration, UserRole, RoomStatus, 
-    CashDrawer, Payment, ExtraCharge, Guest, Stay, Shift
+    Usuario, Habitacion, Configuracion, RolUsuario, EstadoHabitacion,
+    Caja, Pago, CargoExtra, Huesped, Estadia, Turno
 )
 from sqlalchemy.orm import sessionmaker
-from utils.helpers import hash_password
+from utils.helpers import hashear_contrasena
 from datetime import datetime
 
-def reset_database():
-    """Elimina y recrea todas las tablas con soporte para Doble Caja y Turnos"""
-    print("🗑️  Eliminando tablas existentes...")
-    Base.metadata.drop_all(bind=engine)
-    
-    print("🏗️  Creando nuevas tablas (Finanzas v2, Caja Doble, Turnos)...")
-    Base.metadata.create_all(bind=engine)
-    
-    Session = sessionmaker(bind=engine)
-    db = Session()
-    
+
+def reiniciar_base_de_datos():
+    """
+    Elimina todas las tablas y las recrea desde cero
+    con un conjunto de datos iniciales para pruebas.
+    """
+    print("Eliminando tablas existentes...")
+    Base.metadata.drop_all(bind=motor)
+
+    print("Creando nuevas tablas...")
+    Base.metadata.create_all(bind=motor)
+
+    FabricaSesion = sessionmaker(bind=motor)
+    sesion = FabricaSesion()
+
     try:
-        # 1. Crear usuario admin
-        print("👤 Creando usuario administrador...")
-        admin = User(
-            username="admin",
-            password_hash=hash_password("admin123"),
-            full_name="Administrador",
-            email="admin@hotel.com",
-            role=UserRole.ADMIN
+        # ── 1. Usuario administrador por defecto ─────────────────────────────
+        print("Creando usuario administrador...")
+        admin = Usuario(
+            nombre_usuario  = "admin",
+            hash_contrasena = hashear_contrasena("admin123"),
+            nombre_completo = "Administrador",
+            correo          = "admin@hotel.com",
+            rol             = RolUsuario.ADMIN,
         )
-        db.add(admin)
-        
-        # 2. Inicializar Caja Doble
-        print("💵 Inicializando Estructura de Cajas (Principal y Chica)...")
-        caja_inicial = CashDrawer(
-            main_balance_usd=0.0,    # Ventas empiezan en 0
-            main_balance_bs=0.0,
-            petty_cash_usd=100.0,    # Fondo fijo para vueltos
-            petty_cash_bs=8000.0,
-            last_update=datetime.now()
+        sesion.add(admin)
+
+        # ── 2. Estructura de cajas (principal + chica) ───────────────────────
+        print("Inicializando estructura de cajas...")
+        caja_inicial = Caja(
+            saldo_principal_usd  = 0.0,    # Las ventas arrancan en $0
+            saldo_principal_bs   = 0.0,
+            caja_chica_usd       = 100.0,  # Fondo fijo para dar vueltos
+            caja_chica_bs        = 8000.0,
+            ultima_actualizacion = datetime.now(),
         )
-        db.add(caja_inicial)
-        
-        # 3. Crear configuración inicial
-        print("⚙️  Cargando configuraciones y tasa de cambio...")
-        configs = [
-            Configuration(
-                key="exchange_rate", 
-                value="10", 
-                description="Tasa de cambio oficial USD/BS"
+        sesion.add(caja_inicial)
+
+        # ── 3. Configuración inicial del sistema ─────────────────────────────
+        print("Cargando configuración inicial...")
+        configuraciones = [
+            Configuracion(
+                clave       = "exchange_rate",
+                valor       = "36.50",
+                descripcion = "Tasa de cambio oficial USD/Bs",
             ),
-            Configuration(
-                key="hotel_name", 
-                value="La Posada de Daniel", 
-                description="Nombre comercial del hotel"
+            Configuracion(
+                clave       = "hotel_name",
+                valor       = "Hotel Paraíso",
+                descripcion = "Nombre comercial del hotel",
             ),
-            Configuration(
-                key="tax_percentage", 
-                value="16", 
-                description="Porcentaje de impuesto aplicado"
+            Configuracion(
+                clave       = "tax_percentage",
+                valor       = "16",
+                descripcion = "Porcentaje de impuesto (IVA) aplicado a las facturas",
             ),
         ]
-        db.add_all(configs)
-        
-        # 4. Crear habitaciones del 2 al 40
-        print("🏨 Generando habitaciones (2 al 40)...")
-        types = ["Estándar", "Doble", "Suite", "Familiar"]
-        prices = {"Estándar": 43.10, "Doble": 75.0, "Suite": 120.0, "Familiar": 90.0}
-        
-        for i in range(2, 41):
-            room_type = types[i % len(types)]
-            base_p = prices.get(room_type, 50.0)
-            
-            # Habitaciones libres para la prueba de flujo
-            status = RoomStatus.FREE
+        sesion.add_all(configuraciones)
 
-            room = Room(
-                number=str(i),
-                floor=(i // 10) + 1,
-                type=room_type,
-                status=status,
-                base_price_usd=base_p,
-                current_price_usd=base_p,
-                max_occupancy=4 if room_type == "Familiar" else 2,
-                description=f"Habitación {room_type} #{i}",
-                amenities="WiFi, TV, A/A, Agua Caliente"
-            )
-            db.add(room)
-        
-        db.commit()
-        print("\n" + "="*40)
-        print("✅ BASE DE DATOS PREPARADA PARA PRUEBA DE FLUJO")
-        print("="*40)
-        print(f"Caja Principal: $0.00")
-        print(f"Caja Chica (Vueltos): $100.00")
-        print(f"Habitaciones: 39 Disponibles")
-        print("="*40)
-        
-    except Exception as e:
-        db.rollback()
-        print(f"❌ Error crítico durante la inicialización: {e}")
+        # ── 4. Habitaciones del 2 al 40 ──────────────────────────────────────
+        print("Generando habitaciones (2 al 40)...")
+        tipos_habitacion = ["Estándar", "Doble", "Suite", "Familiar"]
+        precios_por_tipo = {
+            "Estándar": 43.10,
+            "Doble":    75.0,
+            "Suite":   120.0,
+            "Familiar": 90.0,
+        }
+
+        for numero in range(2, 41):
+            tipo     = tipos_habitacion[numero % len(tipos_habitacion)]
+            precio   = precios_por_tipo.get(tipo, 50.0)
+            capacidad = 4 if tipo == "Familiar" else 2
+
+            sesion.add(Habitacion(
+                numero            = str(numero),
+                piso              = (numero // 10) + 1,
+                tipo              = tipo,
+                estado            = EstadoHabitacion.FREE,
+                precio_base_usd   = precio,
+                precio_actual_usd = precio,
+                capacidad_maxima  = capacidad,
+                descripcion       = f"Habitación {tipo} #{numero}",
+                amenidades        = "WiFi, TV, A/A, Agua Caliente",
+            ))
+
+        sesion.commit()
+
+        print("\n" + "=" * 45)
+        print("BASE DE DATOS PREPARADA CORRECTAMENTE")
+        print("=" * 45)
+        print(f"  Usuario admin:    admin / admin123")
+        print(f"  Caja principal:   $0.00")
+        print(f"  Caja chica:       $100.00")
+        print(f"  Habitaciones:     39 disponibles (2–40)")
+        print(f"  Tasa inicial:     36.50 Bs/$")
+        print("=" * 45)
+
+    except Exception as error:
+        sesion.rollback()
+        print(f"Error crítico durante la inicialización: {error}")
     finally:
-        db.close()
+        sesion.close()
+
 
 if __name__ == "__main__":
-    print("⚠️  ADVERTENCIA: REINICIO TOTAL")
-    response = input("¿Confirmar limpieza y recreación total? (s/N): ")
-    
-    if response.lower() == 's':
-        reset_database()
+    print("ADVERTENCIA: Esto borrará todos los datos existentes.")
+    respuesta = input("¿Confirmar limpieza y recreación total? (s/N): ")
+    if respuesta.lower() == 's':
+        reiniciar_base_de_datos()
     else:
-        print("❌ Operación cancelada.")
+        print("Operación cancelada.")

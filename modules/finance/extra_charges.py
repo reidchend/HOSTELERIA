@@ -1,77 +1,106 @@
+# modules/finance/extra_charges.py
+
 import flet as ft
-from database.connection import SessionLocal
-from database.models import ExtraCharge, Stay
+from database.connection import SesionLocal
+from database.models import CargoExtra, Estadia
 
-class ExtraChargeDialog:
-    def __init__(self, page, stay, on_success):
-        self.page = page
-        self.stay = stay
-        self.on_success = on_success
-        
-        # UI Components
-        self.service_name = ft.TextField(label="Servicio", expand=True)
-        self.amount_usd = ft.TextField(label="Monto ($)", prefix_text="$ ", width=120)
-        
-        # Info del Fondo Disponible
-        self.fondo_text = ft.Text(
-            f"Fondo disponible: $ {stay.deposit_balance_usd:.2f}",
-            color=ft.Colors.GREEN_700 if stay.deposit_balance_usd > 0 else ft.Colors.RED_400,
-            weight="bold"
-        )
-        
-        self.use_deposit = ft.Switch(
-            label="Cobrar del fondo disponible", 
-            value=stay.deposit_balance_usd > 0,
-            disabled=stay.deposit_balance_usd <= 0
+
+class DialogoCargoExtra:
+    """
+    Diálogo para registrar un consumo adicional a la cuenta del huésped
+    (servicio de lavandería, restaurante, minibar, etc.).
+    Si la estadía tiene saldo a favor, ofrece saldar el cargo directamente.
+    """
+
+    def __init__(self, pagina: ft.Page, estadia: Estadia, al_completar):
+        self.pagina       = pagina
+        self.estadia      = estadia
+        self.al_completar = al_completar
+        self.dialogo      = None
+
+        # Campos del formulario
+        self.campo_servicio = ft.TextField(label="Descripción del Servicio", expand=True)
+        self.campo_monto    = ft.TextField(
+            label="Monto (USD)", prefix_text="$ ", width=120,
+            keyboard_type=ft.KeyboardType.NUMBER,
         )
 
-    def save_charge(self, _):
-        db = SessionLocal()
+        # Indicador del saldo a favor disponible en la estadía
+        saldo_disponible = getattr(estadia, 'deposito_usd', 0.0)
+        self.texto_saldo = ft.Text(
+            f"Saldo a favor: $ {saldo_disponible:.2f}",
+            color=ft.Colors.GREEN_700 if saldo_disponible > 0 else ft.Colors.RED_400,
+            weight="bold",
+        )
+        self.interruptor_saldo = ft.Switch(
+            label="Saldar con saldo a favor",
+            value=saldo_disponible > 0,
+            disabled=saldo_disponible <= 0,
+        )
+
+    def guardar_cargo(self, evento):
+        """Crea el cargo extra y, si se eligió, descuenta del saldo de la estadía."""
+        sesion = SesionLocal()
         try:
-            monto = float(self.amount_usd.value)
-            
-            # 1. Crear el cargo
-            nuevo_cargo = ExtraCharge(
-                stay_id=self.stay.id,
-                service_name=self.service_name.value,
-                amount_usd=monto
-            )
-            db.add(nuevo_cargo)
+            monto = float(self.campo_monto.value)
 
-            # 2. Si se eligió usar el fondo, descontar
-            if self.use_deposit.value:
-                stay_db = db.get(Stay, self.stay.id)  # SQLAlchemy 2.x: usar db.get()
-                if stay_db.deposit_balance_usd >= monto:
-                    stay_db.deposit_balance_usd -= monto
-                    # ExtraCharge no tiene campo 'description'; anotamos en service_name
-                    nuevo_cargo.service_name += " (Saldado con fondo a favor)"
+            nombre_servicio = self.campo_servicio.value
+            if self.interruptor_saldo.value:
+                nombre_servicio += " (Saldado con saldo a favor)"
+
+            # 1. Crear el cargo
+            nuevo_cargo = CargoExtra(
+                estadia_id      = self.estadia.id,
+                nombre_servicio = nombre_servicio,
+                monto_usd       = monto,
+            )
+            sesion.add(nuevo_cargo)
+
+            # 2. Si se eligió usar el saldo a favor, descontar de la estadía
+            if self.interruptor_saldo.value:
+                estadia_bd = sesion.get(Estadia, self.estadia.id)
+                if estadia_bd.deposito_usd >= monto:
+                    estadia_bd.deposito_usd -= monto
                 else:
-                    # page.open() es la API correcta en Flet moderno
-                    self.page.open(ft.SnackBar(ft.Text("Fondo insuficiente para cubrir el total")))
+                    self.pagina.open(ft.SnackBar(
+                        ft.Text("Saldo a favor insuficiente para cubrir el monto"),
+                        bgcolor=ft.Colors.ORANGE_700,
+                    ))
                     return
 
-            db.commit()
-            self.page.close(self.dialog)
-            self.on_success()
-        except Exception as e:
-            db.rollback()
-            # page.open() es la API correcta en Flet moderno
-            self.page.open(ft.SnackBar(ft.Text(f"Error: {e}")))
-        finally:
-            db.close()
+            sesion.commit()
+            self.pagina.close(self.dialogo)
+            if self.al_completar:
+                self.al_completar()
 
-    def show(self):
-        self.dialog = ft.AlertDialog(
-            title=ft.Text("Cargar Nuevo Consumo"),
+        except Exception as error:
+            sesion.rollback()
+            self.pagina.open(ft.SnackBar(
+                ft.Text(f"Error al guardar: {error}"),
+                bgcolor=ft.Colors.RED_700,
+            ))
+        finally:
+            sesion.close()
+
+    def mostrar(self):
+        """Construye y abre el diálogo de cargo extra."""
+        self.dialogo = ft.AlertDialog(
+            title=ft.Text("Registrar Consumo Adicional"),
             content=ft.Column([
-                self.service_name,
-                ft.Row([self.amount_usd, self.fondo_text], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+                self.campo_servicio,
+                ft.Row(
+                    [self.campo_monto, self.texto_saldo],
+                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                ),
                 ft.Divider(),
-                self.use_deposit
+                self.interruptor_saldo,
             ], tight=True, spacing=15),
             actions=[
-                ft.TextButton("Cancelar", on_click=lambda _: self.page.close(self.dialog)),
-                ft.ElevatedButton("Confirmar", on_click=self.save_charge, bgcolor=ft.Colors.BLUE)
-            ]
+                ft.TextButton("Cancelar", on_click=lambda _: self.pagina.close(self.dialogo)),
+                ft.ElevatedButton(
+                    "Confirmar", on_click=self.guardar_cargo,
+                    bgcolor=ft.Colors.BLUE,
+                ),
+            ],
         )
-        self.page.open(self.dialog)
+        self.pagina.open(self.dialogo)

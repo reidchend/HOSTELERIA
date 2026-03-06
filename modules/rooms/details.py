@@ -1,293 +1,413 @@
+# modules/rooms/details.py
+
 import flet as ft
 from datetime import datetime, timedelta
 from sqlalchemy.orm import selectinload
-from database.connection import SessionLocal
-from database.models import Room, Stay, Payment, Configuration, CashDrawer, PaymentMethod
-from modules.finance.payment_dialog import PaymentDialog
+from database.connection import SesionLocal
+from database.models import Habitacion, Estadia, Pago, Configuracion, Caja, MetodoPago
+from modules.finance.payment_dialog import DialogoPago
 
-class RoomDetailsDialog:
-    def __init__(self, page, room, on_checkout_request):
-        self.page = page
-        self.room = room
-        self.on_checkout_request = on_checkout_request
-        self.dialog = None
-        self.stay = None
 
-    def get_exchange_rate(self, db):
-        config = db.query(Configuration).filter(Configuration.key == "exchange_rate").first()
-        if config and config.value:
+class DialogoDetallesHabitacion:
+    """
+    Modal de detalle de una habitación OCUPADA.
+    Muestra la ficha del huésped, el estado financiero de la cuenta y
+    los botones para cobrar, añadir cargos extra, renovar estadía o hacer check-out.
+    """
+
+    def __init__(self, pagina: ft.Page, habitacion: Habitacion, al_solicitar_checkout):
+        self.pagina              = pagina
+        self.habitacion          = habitacion
+        self.al_solicitar_checkout = al_solicitar_checkout
+        self.dialogo             = None
+        self.estadia_activa      = None
+
+    def obtener_tasa_cambio(self, sesion) -> float:
+        """Lee la tasa de cambio vigente desde la tabla de configuración."""
+        config = sesion.query(Configuracion).filter(Configuracion.clave == "exchange_rate").first()
+        if config and config.valor:
             try:
-                return float(config.value)
+                return float(config.valor)
             except ValueError:
-                return 1.0
+                pass
         return 1.0
 
-    def build(self):
-        db = SessionLocal()
+    def construir(self) -> ft.AlertDialog:
+        """Carga los datos frescos desde la BD y construye el diálogo de detalles."""
+        sesion = SesionLocal()
         try:
-            room_data = db.query(Room).filter(Room.id == self.room.id).options(
-                selectinload(Room.active_stays).selectinload(Stay.guests),
-                selectinload(Room.active_stays).selectinload(Stay.extra_charges),
-                selectinload(Room.active_stays).selectinload(Stay.payments)
+            hab_datos = (
+                sesion.query(Habitacion)
+                .filter(Habitacion.id == self.habitacion.id)
+                .options(
+                    selectinload(Habitacion.estadias_activas).selectinload(Estadia.huespedes),
+                    selectinload(Habitacion.estadias_activas).selectinload(Estadia.cargos_extras),
+                    selectinload(Habitacion.estadias_activas).selectinload(Estadia.pagos),
+                )
+                .first()
+            )
+
+            if not hab_datos or not hab_datos.estadias_activas:
+                return ft.AlertDialog(
+                    title=ft.Text("Error"),
+                    content=ft.Text("No se encontró información de esta habitación."),
+                )
+
+            estadia = next((e for e in hab_datos.estadias_activas if e.activa), None)
+            if not estadia:
+                return ft.AlertDialog(
+                    title=ft.Text("Aviso"),
+                    content=ft.Text("No hay una estadía activa en esta habitación."),
+                )
+
+            self.estadia_activa = estadia
+            tasa = self.obtener_tasa_cambio(sesion)
+
+            # Leer porcentaje de IVA desde configuracion (misma fuente que payment_dialog)
+            config_iva     = sesion.query(Configuracion).filter(
+                Configuracion.clave == "tax_percentage"
             ).first()
-            
-            if not room_data or not room_data.active_stays:
-                return ft.AlertDialog(title=ft.Text("Error"), content=ft.Text("No se encontró información."))
+            porcentaje_iva = float(config_iva.valor) if config_iva else 0.0
 
-            active_stay = next((s for s in room_data.active_stays if s.is_active), None)
-            if not active_stay:
-                return ft.AlertDialog(title=ft.Text("Aviso"), content=ft.Text("No hay una estadía activa."))
+            # ── Cálculos financieros ──────────────────────────────────────────
+            titular      = estadia.huespedes[0] if estadia.huespedes else None
+            acompanantes = estadia.huespedes[1:] if len(estadia.huespedes) > 1 else []
 
-            self.stay = active_stay 
-            exchange_rate = self.get_exchange_rate(db)
+            dias = max(1, (estadia.salida.date() - estadia.entrada.date()).days)
+            precio_noche  = (
+                hab_datos.precio_actual_usd if hab_datos.precio_actual_usd
+                else hab_datos.precio_base_usd
+            )
+            subtotal_habitacion = dias * precio_noche
+            total_extras  = sum(c.monto_usd for c in estadia.cargos_extras)
+            total_pagado  = sum(
+                -p.monto_usd if p.es_devolucion else p.monto_usd
+                for p in estadia.pagos
+            )
+            subtotal = subtotal_habitacion + total_extras
+            monto_iva = round(subtotal * (porcentaje_iva / 100), 2)
+            # total_cuenta incluye IVA para que coincida con lo que cobra payment_dialog
+            total_cuenta    = subtotal + monto_iva
+            saldo_pendiente = total_cuenta - total_pagado
 
-            # --- CÁLCULOS ---
-            titular = active_stay.guests[0] if active_stay.guests else None
-            acompanantes = active_stay.guests[1:] if len(active_stay.guests) > 1 else []
-            
-            delta = (active_stay.check_out.date() - active_stay.check_in.date()).days
-            dias_estadia = max(1, delta)
-            
-            # Usamos room_data (recién cargado de BD) en lugar de self.room (puede ser stale)
-            precio_noche = room_data.current_price_usd if room_data.current_price_usd else room_data.base_price_usd
-            subtotal_hab = dias_estadia * precio_noche
-            total_extras = sum(c.amount_usd for c in active_stay.extra_charges)
-            pagado_usd = sum(p.amount_usd if not p.is_refund else -p.amount_usd for p in active_stay.payments)
-            
-            total_cuenta_usd = subtotal_hab + total_extras
-            saldo_pendiente_usd = total_cuenta_usd - pagado_usd
-            
-            es_credito = saldo_pendiente_usd < -0.01
-            color_saldo = ft.Colors.GREEN_700 if es_credito else (ft.Colors.RED_700 if saldo_pendiente_usd > 0.01 else ft.Colors.BLUE_GREY_700)
-            label_saldo = "Saldo a Favor:" if es_credito else "Saldo Pendiente:"
+            es_favor  = saldo_pendiente < -0.01
+            color_saldo = (
+                ft.Colors.GREEN_700 if es_favor
+                else (ft.Colors.RED_700 if saldo_pendiente > 0.01 else ft.Colors.BLUE_GREY_700)
+            )
+            texto_saldo = "Saldo a Favor:" if es_favor else "Saldo Pendiente:"
 
-            # --- INTERFAZ ---
-            layout = ft.Column([
-                # Bloque Tiempos
+            # ── Diseño del contenido ──────────────────────────────────────────
+            cuerpo = ft.Column([
+                # Bloque de fechas y días
                 ft.Container(
                     content=ft.Row([
-                        self._info_item("Entrada", active_stay.check_in.strftime("%d/%m/%Y")),
+                        self.celda_info("Entrada",  estadia.entrada.strftime("%d/%m/%Y")),
                         ft.VerticalDivider(),
-                        self._info_item("Salida Prevista", active_stay.check_out.strftime("%d/%m/%Y")),
+                        self.celda_info("Salida Prevista", estadia.salida.strftime("%d/%m/%Y")),
                         ft.VerticalDivider(),
                         ft.Column([
                             ft.Text("Días", size=11, color=ft.Colors.BLUE_GREY_400),
                             ft.Row([
-                                ft.Text(str(dias_estadia), weight="bold", size=14, color=ft.Colors.BLUE),
-                                ft.IconButton(ft.Icons.AUTORENEW, icon_size=16, on_click=self.open_renew_dialog, tooltip="Añadir días/Renovar")
-                            ], spacing=2, alignment=ft.MainAxisAlignment.CENTER)
+                                ft.Text(str(dias), weight="bold", size=14, color=ft.Colors.BLUE),
+                                ft.IconButton(
+                                    ft.Icons.AUTORENEW, icon_size=16,
+                                    tooltip="Añadir días / Renovar",
+                                    on_click=self.abrir_dialogo_renovacion,
+                                ),
+                            ], spacing=2, alignment=ft.MainAxisAlignment.CENTER),
                         ], expand=1, horizontal_alignment=ft.CrossAxisAlignment.CENTER),
                     ], height=50),
-                    bgcolor=ft.Colors.BLUE_50, padding=10, border_radius=10
+                    bgcolor=ft.Colors.BLUE_50, padding=10, border_radius=10,
                 ),
 
-                # Información del Titular
+                # Datos del titular
                 ft.Container(
-                    content=ft.Column([
-                        ft.Row([
-                            ft.Icon(ft.Icons.PERSON, color=ft.Colors.BLUE_800),
-                            ft.Column([
-                                ft.Text(titular.full_name if titular else "N/A", weight="bold", size=16),
-                                ft.Text(f"Titular - Doc: {titular.document_id if titular else 'S/D'}", size=12),
-                            ], spacing=0)
-                        ]),
+                    content=ft.Row([
+                        ft.Icon(ft.Icons.PERSON, color=ft.Colors.BLUE_800),
+                        ft.Column([
+                            ft.Text(
+                                titular.nombre_completo if titular else "N/A",
+                                weight="bold", size=16,
+                            ),
+                            ft.Text(
+                                f"Titular  ·  Doc: {titular.documento if titular else 'S/D'}",
+                                size=12,
+                            ),
+                        ], spacing=0),
                     ]),
-                    padding=ft.padding.only(bottom=5)
+                    padding=ft.padding.only(bottom=5),
                 ),
 
-                # Sección de Acompañantes
+                # Acompañantes (desplegable)
                 ft.ExpansionTile(
                     title=ft.Text(f"Acompañantes ({len(acompanantes)})", size=13, weight="bold"),
                     leading=ft.Icon(ft.Icons.GROUP_OUTLINED, size=20),
                     initially_expanded=False,
-                    controls=[
-                        ft.ListTile(
-                            dense=True,
-                            title=ft.Text(ac.full_name, size=13),
-                            subtitle=ft.Text(f"Doc: {ac.document_id}", size=11),
-                            leading=ft.Icon(ft.Icons.SUBDIRECTORY_ARROW_RIGHT, size=16)
-                        ) for ac in acompanantes
-                    ] if acompanantes else [
-                        ft.Container(
-                            content=ft.Text("Sin acompañantes registrados", size=12, italic=True),
-                            padding=10
-                        )
-                    ]
+                    controls=(
+                        [
+                            ft.ListTile(
+                                dense=True,
+                                title=ft.Text(ac.nombre_completo, size=13),
+                                subtitle=ft.Text(f"Doc: {ac.documento}", size=11),
+                                leading=ft.Icon(ft.Icons.SUBDIRECTORY_ARROW_RIGHT, size=16),
+                            )
+                            for ac in acompanantes
+                        ] if acompanantes else [
+                            ft.Container(
+                                content=ft.Text("Sin acompañantes registrados", size=12, italic=True),
+                                padding=10,
+                            )
+                        ]
+                    ),
                 ),
 
-                # Bloque Financiero
+                # Bloque financiero
                 ft.Container(
                     content=ft.Column([
+                        # Desglose: subtotal + IVA + total
+                        ft.Row([
+                            ft.Text("Subtotal:", size=11, color=ft.Colors.GREY_700, expand=True),
+                            ft.Text(f"${subtotal:.2f}", size=11, text_align=ft.TextAlign.RIGHT),
+                        ]),
+                        ft.Row([
+                            ft.Text(f"IVA ({porcentaje_iva:.0f}%):", size=11, color=ft.Colors.GREY_700, expand=True),
+                            ft.Text(f"${monto_iva:.2f}", size=11, text_align=ft.TextAlign.RIGHT),
+                        ]) if porcentaje_iva > 0 else ft.Container(height=0),
+                        ft.Row([
+                            ft.Text("Total c/ IVA:", size=12, weight="bold", color=ft.Colors.BLUE_900, expand=True),
+                            ft.Text(f"${total_cuenta:.2f}", size=12, weight="bold",
+                                    color=ft.Colors.BLUE_900, text_align=ft.TextAlign.RIGHT),
+                        ]),
+                        ft.Divider(height=6, color=ft.Colors.GREY_300),
                         ft.Row([
                             ft.Text("Estado de Cuenta:", size=14, weight="bold"),
                             ft.Column([
-                                ft.Text(f"{label_saldo} ${abs(saldo_pendiente_usd):.2f}", size=18, weight="bold", color=color_saldo),
-                                ft.Text(f"Bs. {abs(saldo_pendiente_usd * exchange_rate):,.2f}", size=12, color=color_saldo),
+                                ft.Text(
+                                    f"{texto_saldo} ${abs(saldo_pendiente):.2f}",
+                                    size=18, weight="bold", color=color_saldo,
+                                ),
+                                ft.Text(
+                                    f"Bs. {abs(saldo_pendiente * tasa):,.2f}",
+                                    size=12, color=color_saldo,
+                                ),
                             ], horizontal_alignment=ft.CrossAxisAlignment.END),
                         ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
-                        
+
                         ft.Row([
-                            ft.ElevatedButton("Cargo Extra", icon=ft.Icons.ADD_SHOPPING_CART, on_click=self.add_extra_charge_click, expand=True),
                             ft.ElevatedButton(
-                                "Ir a Pagar", icon=ft.Icons.PAYMENTS, bgcolor=ft.Colors.GREEN_700, color="white",
-                                on_click=lambda _: self.open_payment_module(saldo_pendiente_usd), expand=True,
-                                visible=saldo_pendiente_usd > 0.01
+                                "Cargo Extra", icon=ft.Icons.ADD_SHOPPING_CART,
+                                on_click=self.agregar_cargo_extra,
+                                expand=True,
                             ),
                             ft.ElevatedButton(
-                                "Entregar Vuelto", icon=ft.Icons.MONEY_OFF, bgcolor=ft.Colors.ORANGE_800, color="white",
-                                on_click=lambda _: self.open_refund_selector(abs(saldo_pendiente_usd)), expand=True,
-                                visible=es_credito
+                                "Ir a Cobrar", icon=ft.Icons.PAYMENTS,
+                                bgcolor=ft.Colors.GREEN_700, color="white",
+                                on_click=lambda _: self.abrir_modulo_cobro(saldo_pendiente),
+                                expand=True,
+                                visible=saldo_pendiente > 0.01,
                             ),
-                        ], spacing=10)
+                            ft.ElevatedButton(
+                                "Entregar Vuelto", icon=ft.Icons.MONEY_OFF,
+                                bgcolor=ft.Colors.ORANGE_800, color="white",
+                                on_click=lambda _: self.abrir_selector_devolucion(abs(saldo_pendiente)),
+                                expand=True,
+                                visible=es_favor,
+                            ),
+                        ], spacing=10),
                     ]),
-                    padding=15, bgcolor=ft.Colors.GREY_100, border_radius=12
+                    padding=15, bgcolor=ft.Colors.GREY_100, border_radius=12,
                 ),
 
                 ft.Text("Resumen de Consumos", weight="bold", size=14),
-                self._build_consumos_table(active_stay)
+                self.construir_tabla_consumos(estadia),
             ], scroll=ft.ScrollMode.AUTO, tight=True, spacing=15)
 
-            self.dialog = ft.AlertDialog(
-                title=ft.Row([ft.Icon(ft.Icons.BED, color="red"), ft.Text(f"Habitación {self.room.number}")]),
-                content=ft.Container(content=layout, width=550),
+            self.dialogo = ft.AlertDialog(
+                title=ft.Row([
+                    ft.Icon(ft.Icons.BED, color="red"),
+                    ft.Text(f"Habitación {self.habitacion.numero}"),
+                ]),
+                content=ft.Container(content=cuerpo, width=550),
                 actions=[
-                    ft.TextButton("Cerrar", on_click=lambda _: self.page.close(self.dialog)),
+                    ft.TextButton("Cerrar", on_click=lambda _: self.pagina.close(self.dialogo)),
                     ft.ElevatedButton(
-                        "Check-Out Final", icon=ft.Icons.EXIT_TO_APP, bgcolor="red", color="white",
-                        on_click=lambda _: self.on_checkout_request(self.room),
-                        disabled=saldo_pendiente_usd > 0.01
+                        "Check-Out Final", icon=ft.Icons.EXIT_TO_APP,
+                        bgcolor="red", color="white",
+                        on_click=lambda _: self.al_solicitar_checkout(self.habitacion),
+                        disabled=saldo_pendiente > 0.01,
                     ),
-                ]
+                ],
             )
-            return self.dialog
-        finally:
-            db.close()
+            return self.dialogo
 
-    def _info_item(self, label, value, color=ft.Colors.BLACK):
+        finally:
+            sesion.close()
+
+    def celda_info(self, etiqueta: str, valor: str) -> ft.Column:
+        """Devuelve un bloque de dos líneas: etiqueta pequeña + valor en negrita."""
         return ft.Column([
-            ft.Text(label, size=11, color=ft.Colors.BLUE_GREY_400),
-            ft.Text(value, weight="bold", size=14, color=color),
+            ft.Text(etiqueta, size=11, color=ft.Colors.BLUE_GREY_400),
+            ft.Text(valor, weight="bold", size=14),
         ], expand=1, horizontal_alignment=ft.CrossAxisAlignment.CENTER)
 
-    def _build_consumos_table(self, stay):
-        rows = [
+    def construir_tabla_consumos(self, estadia: Estadia):
+        """Tabla de consumos facturados: hospedaje base + cargos extra."""
+        filas = [
             ft.DataRow(cells=[
                 ft.DataCell(ft.Text("Hospedaje Base")),
-                ft.DataCell(ft.Text(f"$ {self.room.base_price_usd:.2f} (x d)"))
+                ft.DataCell(ft.Text(f"$ {self.habitacion.precio_base_usd:.2f} (x día)")),
             ])
         ]
-        for charge in stay.extra_charges:
-            rows.append(ft.DataRow(cells=[
-                ft.DataCell(ft.Text(charge.service_name)),
-                ft.DataCell(ft.Text(f"$ {charge.amount_usd:.2f}"))
+        for cargo in estadia.cargos_extras:
+            filas.append(ft.DataRow(cells=[
+                ft.DataCell(ft.Text(cargo.nombre_servicio)),
+                ft.DataCell(ft.Text(f"$ {cargo.monto_usd:.2f}")),
             ]))
 
-        if not stay.extra_charges and not stay.payments:
+        if not estadia.cargos_extras and not estadia.pagos:
             return ft.Text("No hay cargos adicionales.", size=12, italic=True)
 
         return ft.DataTable(
-            columns=[ft.DataColumn(ft.Text("Concepto")), ft.DataColumn(ft.Text("Monto USD"))],
-            rows=rows
+            columns=[
+                ft.DataColumn(ft.Text("Concepto")),
+                ft.DataColumn(ft.Text("Monto USD")),
+            ],
+            rows=filas,
         )
 
-    # --- LÓGICA DE RENOVACIÓN ---
-    def open_renew_dialog(self, _):
-        days_input = ft.TextField(label="Días a renovar", value="1", suffix_text="noche(s)", keyboard_type=ft.KeyboardType.NUMBER)
-        
-        def confirm_renewal(_):
-            try:
-                days = int(days_input.value)
-                if days <= 0: return
-                db = SessionLocal()
-                stay = db.query(Stay).filter(Stay.id == self.stay.id).first()
-                stay.check_out = stay.check_out + timedelta(days=days)
-                db.commit()
-                db.close()
-                self.page.close(renew_modal)
-                self.refresh_details()
-                self.page.open(ft.SnackBar(ft.Text(f"Estadía extendida {days} día(s).")))
-            except: pass
+    # ── LÓGICA DE RENOVACIÓN ────────────────────────────────────────────────
 
-        renew_modal = ft.AlertDialog(
+    def abrir_dialogo_renovacion(self, evento):
+        """Permite extender la estadía agregando más noches."""
+        campo_dias = ft.TextField(
+            label="Días a renovar", value="1",
+            suffix_text="noche(s)", keyboard_type=ft.KeyboardType.NUMBER,
+        )
+
+        def confirmar_renovacion(evento):
+            try:
+                dias = int(campo_dias.value)
+                if dias <= 0:
+                    return
+                sesion = SesionLocal()
+                estadia = sesion.query(Estadia).filter(Estadia.id == self.estadia_activa.id).first()
+                estadia.salida = estadia.salida + timedelta(days=dias)
+                sesion.commit()
+                sesion.close()
+                self.pagina.close(modal_renovacion)
+                self.refrescar_detalles()
+                self.pagina.open(ft.SnackBar(ft.Text(f"Estadía extendida {dias} día(s).")))
+            except Exception:
+                pass
+
+        modal_renovacion = ft.AlertDialog(
             title=ft.Text("Renovar Estadía"),
-            content=days_input,
+            content=campo_dias,
             actions=[
-                ft.TextButton("Cancelar", on_click=lambda _: self.page.close(renew_modal)),
-                ft.ElevatedButton("Confirmar", on_click=confirm_renewal)
-            ]
+                ft.TextButton("Cancelar", on_click=lambda _: self.pagina.close(modal_renovacion)),
+                ft.ElevatedButton("Confirmar", on_click=confirmar_renovacion),
+            ],
         )
-        self.page.open(renew_modal)
+        self.pagina.open(modal_renovacion)
 
-    # --- LÓGICA DE ENTREGA DE VUELTO ---
-    def open_refund_selector(self, amount):
-        source_radio = ft.RadioGroup(content=ft.Column([
-            ft.Radio(value="main", label="Caja Principal (Efectivo)"),
-            ft.Radio(value="small", label="Caja Chica (Recepción)"),
-            ft.Radio(value="admin_pm", label="Pago Móvil (Desde Administración)"),
-        ]))
-        source_radio.value = "main"
+    # ── LÓGICA DE DEVOLUCIÓN DE VUELTO ──────────────────────────────────────
 
-        def process_refund(e):
-            db = SessionLocal()
+    def abrir_selector_devolucion(self, monto_usd: float):
+        """Selecciona la caja desde donde se entregará el vuelto."""
+        selector_fuente = ft.RadioGroup(
+            content=ft.Column([
+                ft.Radio(value="principal", label="Caja Principal (Efectivo)"),
+                ft.Radio(value="chica",     label="Caja Chica (Recepción)"),
+                ft.Radio(value="pm_admin",  label="Pago Móvil (Administración)"),
+            ])
+        )
+        selector_fuente.value = "principal"
+
+        def procesar_devolucion(evento):
+            sesion = SesionLocal()
             try:
-                source = source_radio.value
-                caja = db.query(CashDrawer).first()
-                description = ""
-                method = PaymentMethod.CASH_USD
+                fuente = selector_fuente.value
+                caja = sesion.query(Caja).first()
+                descripcion = ""
+                metodo_pago = MetodoPago.CASH_USD
 
-                if source == "main":
-                    if caja.main_balance_usd < amount: raise Exception("Caja Principal sin fondos.")
-                    caja.main_balance_usd -= amount
-                    description = "Vuelto devuelto desde Caja Principal"
-                elif source == "small":
-                    # El campo correcto del modelo es petty_cash_usd, no small_cash_usd
-                    if caja.petty_cash_usd < amount: raise Exception("Caja Chica sin fondos.")
-                    caja.petty_cash_usd -= amount
-                    description = "Vuelto devuelto desde Caja Chica"
-                elif source == "admin_pm":
-                    # PaymentMethod.TRANSFER no existe en el enum; el equivalente es PAGO_MOVIL
-                    method = PaymentMethod.PAGO_MOVIL
-                    description = "Vuelto devuelto vía Pago Móvil Administrador"
+                if fuente == "principal":
+                    if caja.saldo_principal_usd < monto_usd:
+                        raise Exception("Caja Principal sin fondos suficientes.")
+                    caja.saldo_principal_usd -= monto_usd
+                    descripcion = "Vuelto devuelto desde Caja Principal"
+                elif fuente == "chica":
+                    if caja.caja_chica_usd < monto_usd:
+                        raise Exception("Caja Chica sin fondos suficientes.")
+                    caja.caja_chica_usd -= monto_usd
+                    descripcion = "Vuelto devuelto desde Caja Chica"
+                elif fuente == "pm_admin":
+                    metodo_pago = MetodoPago.PAGO_MOVIL
+                    descripcion = "Vuelto devuelto vía Pago Móvil del Administrador"
 
-                refund_entry = Payment(
-                    stay_id=self.stay.id, amount_usd=amount,
-                    exchange_rate=self.get_exchange_rate(db),
-                    method=method, is_refund=True, description=description
-                )
-                db.add(refund_entry); db.commit()
-                self.page.close(refund_modal); self.refresh_details()
-                self.page.open(ft.SnackBar(ft.Text("Vuelto entregado exitosamente"), bgcolor="green"))
-            except Exception as ex:
-                self.page.open(ft.SnackBar(ft.Text(str(ex)), bgcolor="red"))
+                sesion.add(Pago(
+                    estadia_id    = self.estadia_activa.id,
+                    monto_usd     = monto_usd,
+                    tasa_cambio   = self.obtener_tasa_cambio(sesion),
+                    metodo        = metodo_pago,
+                    es_devolucion = True,
+                    descripcion   = descripcion,
+                ))
+                sesion.commit()
+                self.pagina.close(modal_devolucion)
+                self.refrescar_detalles()
+                self.pagina.open(ft.SnackBar(ft.Text("Vuelto entregado exitosamente"), bgcolor="green"))
+
+            except Exception as error:
+                self.pagina.open(ft.SnackBar(ft.Text(str(error)), bgcolor="red"))
             finally:
-                db.close()
+                sesion.close()
 
-        refund_modal = ft.AlertDialog(
+        modal_devolucion = ft.AlertDialog(
             title=ft.Text("Seleccionar Origen del Vuelto"),
-            content=ft.Column([ft.Text(f"Monto: ${amount:.2f}"), source_radio], tight=True),
+            content=ft.Column([
+                ft.Text(f"Monto a entregar: ${monto_usd:.2f}"),
+                selector_fuente,
+            ], tight=True),
             actions=[
-                ft.TextButton("Cancelar", on_click=lambda _: self.page.close(refund_modal)),
-                ft.ElevatedButton("Procesar", on_click=process_refund, bgcolor="orange", color="white")
-            ]
+                ft.TextButton("Cancelar", on_click=lambda _: self.pagina.close(modal_devolucion)),
+                ft.ElevatedButton(
+                    "Procesar", on_click=procesar_devolucion,
+                    bgcolor="orange", color="white",
+                ),
+            ],
         )
-        self.page.open(refund_modal)
+        self.pagina.open(modal_devolucion)
 
-    def open_payment_module(self, amount):
-        self.page.close(self.dialog)
-        pay_dialog = PaymentDialog(self.page, self.stay, total_to_pay=amount, on_success=self.refresh_details)
-        pay_dialog.show()
+    # ── NAVEGACIÓN ──────────────────────────────────────────────────────────
 
-    def add_extra_charge_click(self, _):
-        from modules.finance.extra_charges import ExtraChargeDialog
-        dialog = ExtraChargeDialog(self.page, self.stay, on_success=self.refresh_details)
-        dialog.show()
+    def abrir_modulo_cobro(self, saldo_pendiente: float):
+        """Cierra este diálogo y abre el módulo de cobro."""
+        self.pagina.close(self.dialogo)
+        modulo_cobro = DialogoPago(
+            self.pagina, self.estadia_activa,
+            total_a_pagar=saldo_pendiente,
+            al_completar=self.refrescar_detalles,
+        )
+        modulo_cobro.mostrar()
 
-    def refresh_details(self):
-        # Cerramos el diálogo actual antes de abrir uno nuevo para evitar apilamiento
-        if self.dialog:
-            self.page.close(self.dialog)
-        self.show()
+    def agregar_cargo_extra(self, evento):
+        """Abre el módulo de cargos extra para esta estadía."""
+        from modules.finance.extra_charges import DialogoCargoExtra
+        dialogo = DialogoCargoExtra(
+            self.pagina, self.estadia_activa,
+            al_completar=self.refrescar_detalles,
+        )
+        dialogo.mostrar()
 
-    def show(self):
-        self.dialog = self.build()
-        self.page.open(self.dialog)
+    def refrescar_detalles(self):
+        """Cierra el diálogo actual y vuelve a abrirlo con datos frescos de la BD."""
+        if self.dialogo:
+            self.pagina.close(self.dialogo)
+        self.mostrar()
+
+    def mostrar(self):
+        """Construye y abre el diálogo de detalles."""
+        self.dialogo = self.construir()
+        self.pagina.open(self.dialogo)
