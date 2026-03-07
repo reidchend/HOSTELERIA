@@ -114,20 +114,9 @@ def principal(pagina: ft.Page):
                 ))
                 return
 
-            # 1. Transferir saldo a favor al huésped titular
-            if estadia.deposito_usd and estadia.deposito_usd > 0.01:
-                titular = estadia.huespedes[0] if estadia.huespedes else None
-                if titular:
-                    huesped_bd = sesion.get(Huesped, titular.id)
-                    huesped_bd.credito_usd = (
-                        (huesped_bd.credito_usd or 0.0) + estadia.deposito_usd
-                    )
-                    monto_transferido = estadia.deposito_usd
-                    estadia.deposito_usd = 0.0
-                else:
-                    monto_transferido = 0.0
-            else:
-                monto_transferido = 0.0
+            # El saldo a favor vive en Huesped.credito_usd directamente.
+            # No hay nada que transferir desde deposito_usd en el checkout.
+            monto_transferido = 0.0
 
             # 2. Marcar la estadía como cerrada
             estadia.activa = False

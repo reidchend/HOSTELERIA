@@ -204,17 +204,14 @@ class DialogoCheckIn:
             self.total_calculado = noches * precio_noche
 
             # 4. Crear la estadía
-            # Si el huésped tiene crédito de estadías anteriores,
-            # se transfiere al depósito de esta estadía y se limpia del huésped.
-            credito_inicial = titular.credito_usd or 0.0
-            if credito_inicial > 0:
-                titular.credito_usd = 0.0
+            # El crédito previo permanece en Huesped.credito_usd.
+            # Estadia.deposito_usd ya no se usa para saldo a favor.
             self.estadia_actual = Estadia(
                 habitacion_id = habitacion_bd.id,
                 entrada       = fecha_entrada,
                 salida        = fecha_salida,
                 activa        = True,
-                deposito_usd  = credito_inicial,  # crédito previo disponible
+                deposito_usd  = 0.0,
             )
             self.estadia_actual.huespedes = lista_huespedes
             sesion.add(self.estadia_actual)

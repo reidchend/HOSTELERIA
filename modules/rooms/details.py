@@ -214,33 +214,96 @@ class DialogoDetallesHabitacion:
     # ═══════════════════════════════════════════════════════════════════════
 
     def _encabezado_huesped(self, titular, acompanantes, estadia, tasa) -> ft.Container:
-        return ft.Container(
+        # ── Datos completos del titular ───────────────────────────────────────
+        credito_titular = round(titular.credito_usd or 0.0, 2) if titular else 0.0
+
+        detalles_titular = []
+        if titular:
+            detalles_titular = [
+                (ft.Icons.BADGE,           f"Doc: {titular.documento}"),
+                (ft.Icons.CAKE,            f"Nac: {titular.fecha_nacimiento.strftime('%d/%m/%Y') if titular.fecha_nacimiento else '—'}"),
+                (ft.Icons.FLAG,            f"{titular.nacionalidad or '—'}"),
+                (ft.Icons.WORK_OUTLINE,    f"{titular.profesion or '—'}"),
+                (ft.Icons.PHONE,           f"{titular.telefono or '—'}"),
+                (ft.Icons.DIRECTIONS_CAR,  f"{titular.vehiculo or '—'}"),
+            ]
+
+        filas_titular = [
+            ft.Row([
+                ft.Icon(icono, size=13, color=ft.Colors.BLUE_600),
+                ft.Text(texto, size=11, color=ft.Colors.GREY_700),
+            ], spacing=5)
+            for icono, texto in detalles_titular
+        ]
+
+        # ── Acompañantes con cédula ───────────────────────────────────────────
+        chips_acomp = []
+        for ac in acompanantes:
+            chips_acomp.append(
+                ft.Container(
+                    content=ft.Row([
+                        ft.Icon(ft.Icons.PERSON_OUTLINE, size=11, color=ft.Colors.BLUE_700),
+                        ft.Text(ac.nombre_completo, size=10, weight="bold"),
+                        ft.Text(f"({ac.documento})", size=10, color=ft.Colors.GREY_600),
+                    ], spacing=4),
+                    bgcolor=ft.Colors.BLUE_50,
+                    padding=ft.padding.symmetric(horizontal=8, vertical=3),
+                    border_radius=10,
+                    border=ft.border.all(1, ft.Colors.BLUE_100),
+                )
+            )
+
+        # ── Chip de saldo a favor ─────────────────────────────────────────────
+        chip_saldo = ft.Container(
             content=ft.Row([
-                ft.Column([
+                ft.Icon(ft.Icons.ACCOUNT_BALANCE_WALLET, size=13,
+                        color=ft.Colors.WHITE if credito_titular > 0.01 else ft.Colors.GREY_500),
+                ft.Text(
+                    f"Saldo a favor: ${credito_titular:.2f}",
+                    size=11, weight="bold",
+                    color=ft.Colors.WHITE if credito_titular > 0.01 else ft.Colors.GREY_500,
+                ),
+            ], spacing=5),
+            bgcolor=ft.Colors.GREEN_700 if credito_titular > 0.01 else ft.Colors.GREY_100,
+            padding=ft.padding.symmetric(horizontal=10, vertical=4),
+            border_radius=8,
+        )
+
+        return ft.Container(
+            content=ft.Column([
+                # Fila superior: nombre + estadía + saldo
+                ft.Row([
                     ft.Row([
                         ft.Icon(ft.Icons.PERSON, color=ft.Colors.BLUE_800, size=18),
                         ft.Text(
                             titular.nombre_completo if titular else "N/A",
                             weight="bold", size=15,
                         ),
-                    ], spacing=5),
-                    ft.Text(
-                        f"Doc: {titular.documento if titular else 'S/D'}  ·  "
-                        f"{estadia.entrada.strftime('%d/%m/%Y')} → "
-                        f"{estadia.salida.strftime('%d/%m/%Y')}",
-                        size=11, color=ft.Colors.GREY_600,
-                    ),
-                ], spacing=2, expand=True),
-                ft.Row([
-                    ft.Container(
-                        content=ft.Text(ac.nombre_completo, size=10),
-                        bgcolor=ft.Colors.BLUE_50,
-                        padding=ft.padding.symmetric(horizontal=7, vertical=2),
-                        border_radius=10,
-                    )
-                    for ac in acompanantes
-                ], spacing=4, wrap=True),
-            ]),
+                    ], spacing=5, expand=True),
+                    chip_saldo,
+                ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+                ft.Text(
+                    f"{estadia.entrada.strftime('%d/%m/%Y')} → {estadia.salida.strftime('%d/%m/%Y')}",
+                    size=11, color=ft.Colors.GREY_600,
+                ),
+                ft.Divider(height=6, color=ft.Colors.BLUE_100),
+                # Datos personales en dos columnas
+                ft.Row(
+                    controls=[
+                        ft.Column(filas_titular[:3], spacing=4, expand=True),
+                        ft.Column(filas_titular[3:], spacing=4, expand=True),
+                    ],
+                    spacing=10,
+                ) if filas_titular else ft.Container(),
+                # Acompañantes
+                ft.Column([
+                    ft.Row([
+                        ft.Icon(ft.Icons.GROUP, size=13, color=ft.Colors.BLUE_600),
+                        ft.Text("Acompañantes:", size=11, color=ft.Colors.GREY_600, italic=True),
+                    ], spacing=4),
+                    ft.Row(controls=chips_acomp, spacing=6, wrap=True),
+                ], spacing=4) if acompanantes else ft.Container(),
+            ], spacing=6),
             bgcolor=ft.Colors.BLUE_50,
             padding=ft.padding.symmetric(horizontal=14, vertical=10),
             border_radius=10,
