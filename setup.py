@@ -79,7 +79,7 @@ def reiniciar_base_de_datos():
         print("Generando habitaciones (2 al 40)...")
         tipos_habitacion = ["Estándar", "Doble", "Suite", "Familiar"]
         precios_por_tipo = {
-            "Estándar": 43.10,
+            "Estándar": 43.1034,
             "Doble":    75.0,
             "Suite":   120.0,
             "Familiar": 90.0,

@@ -3,15 +3,17 @@
 
 import flet as ft
 from database.connection import SesionLocal
-from database.models import Pago, Caja, MetodoPago, Configuracion, Estadia, Huesped, Habitacion
+from database.models import (
+    Pago, Caja, MetodoPago, Estadia, Huesped,
+    LineaCuenta, TipoLinea, TransaccionCobro,
+)
+from sqlalchemy.orm import selectinload
 from datetime import datetime
+from utils.calculos_financieros import leer_config_financiera, a_bs, a_usd
 
 # ══════════════════════════════════════════════════════════════════════════════
 # CONFIGURACIÓN VISUAL POR MÉTODO DE PAGO
 # ══════════════════════════════════════════════════════════════════════════════
-# Cada clave es un MetodoPago; el valor describe cómo mostrarlo en la UI.
-# "es_bs": True  → el recepcionista ingresa el monto en bolívares.
-# "es_bs": False → el recepcionista ingresa el monto en dólares.
 
 CONFIGURACION_METODOS = {
     MetodoPago.CASH_USD: {
@@ -55,170 +57,120 @@ CONFIGURACION_METODOS = {
 
 class DialogoPago:
     """
-    Diálogo de cobro con dos paneles en paralelo.
+    Diálogo de cobro con soporte para IVA mixto y pagos parciales.
 
-    PANEL IZQUIERDO ── Factura detallada del folio con saldo dinámico.
-                       Se actualiza en tiempo real con cada pago añadido.
+    PANEL IZQUIERDO ── Detalle de las líneas seleccionadas a cobrar,
+                       con desglose de IVA por tipo de línea y saldo dinámico.
 
-    PANEL DERECHO ───── Área operativa: métodos de pago, formulario de entrada,
-                        lista de pagos de la sesión y sección de sobrante/vuelto.
+    PANEL DERECHO ───── Métodos de pago, formulario de entrada,
+                        lista de pagos de la sesión y gestión de sobrante/vuelto.
 
-    Flujo principal:
-      1. El recepcionista pulsa un método de pago → aparece el formulario.
-      2. Ingresa el monto → pulsa "AGREGAR PAGO".
-      3. El pago aparece en la lista y el saldo se actualiza al instante.
-      4. Puede agregar más pagos (distintos métodos) hasta cubrir el total.
-      5. Si el cliente paga de más, aparece la sección de sobrante con dos opciones:
-           a) Dejar como saldo a favor (queda ligado al Huesped, persiste entre estadías).
-           b) Entregar vuelto en efectivo con desglose multimoneda / multicaja.
-      6. Al finalizar se graba todo en la BD en una única transacción atómica.
+    LÓGICA DE IVA:
+      · Hospedaje  → el monto en LineaCuenta NO incluye IVA (la hab. está exenta
+                     o el IVA ya fue considerado por separado en el precio base).
+                     Se muestra sin recargo adicional.
+      · Cargo extra → el monto en LineaCuenta ya incluye IVA (el recepcionista
+                      ingresa el precio final). Se muestra como viene.
+
+    PAGO PARCIAL:
+      Si el cliente paga menos del total seleccionado, al finalizar se crea
+      una TransaccionCobro que registra:
+        - Las líneas originales → marcadas canceladas (agrupadas bajo la transacción)
+        - Una nueva LineaCuenta SALDO_PENDIENTE con la diferencia → cobrable después
+
+    HISTORIAL:
+      details.py agrupa las líneas por TransaccionCobro para mostrar
+      "Factura #N — pagado $X — pendiente $Y" con sus conceptos anidados.
     """
 
-    def __init__(self, pagina: ft.Page, estadia, total_a_pagar: float, al_completar):
-        self.pagina         = pagina
-        self.estadia        = estadia
-        self.id_estadia     = estadia.id    # Guardamos el ID; el objeto puede estar detached
-        self.total_a_pagar  = total_a_pagar # Saldo neto pendiente al abrir el diálogo
-        self.al_completar   = al_completar
-        self.dialogo        = None
+    def __init__(
+        self,
+        pagina:          ft.Page,
+        estadia,
+        total_a_pagar:   float,
+        al_completar,
+        lineas_ids:      list[int] | None = None,   # IDs de LineaCuenta seleccionadas
+    ):
+        self.pagina        = pagina
+        self.estadia       = estadia
+        self.id_estadia    = estadia.id
+        self.total_a_pagar = total_a_pagar   # Suma de monto_usd de las líneas seleccionadas
+        self.al_completar  = al_completar
+        self.lineas_ids    = lineas_ids or []
+        self.dialogo       = None
 
-        # ── Estado de la sesión de cobro ──────────────────────────────────────
-        # Lista de pagos añadidos en ESTA sesión (todavía NO grabados en la BD).
-        # Cada elemento es un dict con los campos necesarios para crear un Pago.
-        self.pagos_sesion: list   = []
-        self.tasa_cambio: float   = 1.0
-        self.porcentaje_iva: float = 0.0
-
-        # ── Referencias a widgets dinámicos ───────────────────────────────────
-        # Mantener referencias directas evita reconstruir todo el árbol con cada actualización.
-        self.columna_saldo        = ft.Column(spacing=6)    # Saldo en el panel izquierdo
-        self.columna_pagos_sesion = ft.Column(spacing=6)    # Lista de pagos de la sesión
-        self.area_formulario      = ft.Column(spacing=8)    # Formulario del método activo
-        self.seccion_sobrante     = ft.Container(visible=False)  # Sobrante / vuelto
-        self.btn_finalizar        = None                    # Se instancia en construir()
-
-        # Referencias para procesar el sobrante al finalizar
-        self.radio_tipo_sobrante = None   # RadioGroup: crédito vs vuelto
-        self.campos_desglose_vuelto = None  # Tupla de 4 TextFields del desglose
-        self.monto_sobrante_usd  = 0.0    # Monto calculado del sobrante
-
-        self.cargar_configuracion()
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # CARGA DE CONFIGURACIÓN
-    # ══════════════════════════════════════════════════════════════════════════
-
-    def cargar_configuracion(self):
-        """Lee la tasa de cambio y el porcentaje de IVA desde la tabla de configuración."""
         sesion = SesionLocal()
         try:
-            config_tasa = sesion.query(Configuracion).filter(
-                Configuracion.clave == "exchange_rate"
-            ).first()
-            config_iva = sesion.query(Configuracion).filter(
-                Configuracion.clave == "tax_percentage"
-            ).first()
-            self.tasa_cambio    = float(config_tasa.valor) if config_tasa else 1.0
-            self.porcentaje_iva = float(config_iva.valor)  if config_iva  else 0.0
+            self.config = leer_config_financiera(sesion)
+            estadia_bd  = sesion.get(Estadia, estadia.id)
+            self.saldo_favor_disponible = estadia_bd.deposito_usd or 0.0
         finally:
             sesion.close()
 
+        self.pagos_sesion: list = []
+
+        # Widgets dinámicos
+        self.columna_saldo        = ft.Column(spacing=6)
+        self.columna_pagos_sesion = ft.Column(spacing=6)
+        self.area_formulario      = ft.Column(spacing=8)
+        self.seccion_sobrante     = ft.Container(visible=False)
+        self.btn_finalizar        = None
+
+        self.radio_tipo_sobrante    = None
+        self.campos_desglose_vuelto = None
+        self.monto_sobrante_usd     = 0.0
+
     # ══════════════════════════════════════════════════════════════════════════
-    # CARGA DE DATOS DEL FOLIO
+    # CARGA DE DATOS — LÍNEAS SELECCIONADAS
     # ══════════════════════════════════════════════════════════════════════════
 
-    def obtener_datos_factura(self, sesion) -> dict:
-        """
-        Carga el folio completo desde la BD (siempre fresco para evitar
-        objetos detached de SQLAlchemy entre sesiones).
-        """
+    def _cargar_lineas(self, sesion) -> list:
+        """Carga las LineaCuenta seleccionadas (frescas desde la BD)."""
+        if not self.lineas_ids:
+            return []
+        return (
+            sesion.query(LineaCuenta)
+            .filter(LineaCuenta.id.in_(self.lineas_ids))
+            .all()
+        )
+
+    def _datos_para_panel(self, sesion) -> dict:
+        """Datos del encabezado del diálogo."""
         from sqlalchemy.orm import selectinload
-
         estadia = (
             sesion.query(Estadia)
             .options(
                 selectinload(Estadia.huespedes),
-                selectinload(Estadia.cargos_extras),
+                selectinload(Estadia.habitacion),
                 selectinload(Estadia.pagos),
             )
             .filter(Estadia.id == self.id_estadia)
             .first()
         )
-        habitacion = sesion.query(Habitacion).filter(
-            Habitacion.id == estadia.habitacion_id
-        ).first()
-
-        # ── Líneas del folio ──────────────────────────────────────────────────
-        noches       = max(1, (estadia.salida.date() - estadia.entrada.date()).days)
-        precio_noche = habitacion.precio_actual_usd or habitacion.precio_base_usd
-
-        lineas_consumo = [
-            {
-                "concepto": (
-                    f"Hospedaje — Hab. {habitacion.numero} "
-                    f"({noches} noche{'s' if noches > 1 else ''})"
-                ),
-                "cantidad": noches,
-                "unitario": precio_noche,
-                "total":    noches * precio_noche,
-            }
-        ]
-        for cargo in estadia.cargos_extras:
-            cant = max(cargo.cantidad, 1)
-            lineas_consumo.append({
-                "concepto": cargo.nombre_servicio,
-                "cantidad": cant,
-                "unitario": cargo.monto_usd / cant,
-                "total":    cargo.monto_usd,
-            })
-
-        subtotal = sum(linea["total"] for linea in lineas_consumo)
-        # IVA se calcula sobre total_a_pagar para respetar abonos previos
-        iva      = round(self.total_a_pagar * (self.porcentaje_iva / 100), 2)
-        total    = subtotal + iva
-
-        # ── Pagos ya grabados en BD (sesiones anteriores) ─────────────────────
-        pagos_previos = [p for p in estadia.pagos if not p.es_devolucion]
-
         return {
-            "estadia":        estadia,
-            "habitacion":     habitacion,
-            "lineas_consumo": lineas_consumo,
-            "subtotal":       subtotal,
-            "iva":            iva,
-            "total":          total,
-            "pagos_previos":  pagos_previos,
-            "titular":        estadia.huespedes[0] if estadia.huespedes else None,
-            "fecha_entrada":  estadia.entrada.strftime("%d/%m/%Y"),
-            "fecha_salida":   estadia.salida.strftime("%d/%m/%Y"),
+            "estadia":      estadia,
+            "habitacion":   estadia.habitacion,
+            "titular":      estadia.huespedes[0] if estadia.huespedes else None,
+            "pagos_previos":[p for p in estadia.pagos if not p.es_devolucion],
         }
 
     # ══════════════════════════════════════════════════════════════════════════
-    # CÁLCULO DE SALDO EN TIEMPO REAL
+    # SALDO EN TIEMPO REAL
     # ══════════════════════════════════════════════════════════════════════════
 
-    def calcular_saldo_pendiente(self) -> float:
-        """
-        Retorna el saldo pendiente en USD.
-          > 0  → el cliente aún debe dinero
-          ≈ 0  → cuenta saldada exactamente
-          < 0  → el cliente pagó de más (sobrante)
-
-        total_a_pagar ya incluye los abonos previos grabados en la BD.
-        El IVA se suma porque forma parte del cobro pendiente.
-        """
-        total_abonado_sesion = sum(p["monto_usd"] for p in self.pagos_sesion)
-        iva                  = round(self.total_a_pagar * (self.porcentaje_iva / 100), 2)
-        return self.total_a_pagar - total_abonado_sesion + iva
+    def _pendiente(self) -> float:
+        abonado = sum(p["monto_usd"] for p in self.pagos_sesion)
+        return round(self.total_a_pagar - abonado, 2)
 
     # ══════════════════════════════════════════════════════════════════════════
-    # CONSTRUCCIÓN PRINCIPAL DE LA UI
+    # CONSTRUCCIÓN DE LA UI
     # ══════════════════════════════════════════════════════════════════════════
 
     def construir(self) -> ft.AlertDialog:
         sesion = SesionLocal()
         try:
-            datos_factura = self.obtener_datos_factura(sesion)
+            datos  = self._datos_para_panel(sesion)
+            lineas = self._cargar_lineas(sesion)
         finally:
             sesion.close()
 
@@ -232,30 +184,33 @@ class DialogoPago:
             height=46,
         )
 
-        panel_izquierdo = self.construir_panel_factura(datos_factura)
-        panel_derecho   = self.construir_panel_cobro()
-
         cuerpo = ft.Row(
             controls=[
-                # Panel izquierdo: factura con fondo gris muy suave
                 ft.Container(
-                    content=panel_izquierdo,
-                    width=310,
+                    content=self._panel_factura(datos, lineas),
+                    width=320,
                     bgcolor=ft.Colors.GREY_50,
-                    border=ft.border.only(right=ft.border.BorderSide(1, ft.Colors.GREY_200)),
+                    border=ft.border.only(
+                        right=ft.border.BorderSide(1, ft.Colors.GREY_200)
+                    ),
                     padding=18,
                 ),
-                # Panel derecho: área de cobro
-                ft.Container(content=panel_derecho, expand=True, padding=18),
+                ft.Container(
+                    content=self._panel_cobro(),
+                    expand=True, padding=18,
+                ),
             ],
             spacing=0, expand=True,
         )
 
         self.dialogo = ft.AlertDialog(
-            title=self.construir_encabezado(datos_factura),
-            content=ft.Container(content=cuerpo, width=860, height=530),
+            title=self._encabezado(datos),
+            content=ft.Container(content=cuerpo, width=880, height=540),
             actions=[
-                ft.TextButton("Cancelar", on_click=lambda _: self.pagina.close(self.dialogo)),
+                ft.TextButton(
+                    "Cancelar",
+                    on_click=lambda _: self.pagina.close(self.dialogo),
+                ),
                 self.btn_finalizar,
             ],
             actions_alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
@@ -263,207 +218,168 @@ class DialogoPago:
         )
         return self.dialogo
 
-    # ── Encabezado del diálogo ─────────────────────────────────────────────────
-
-    def construir_encabezado(self, datos_factura) -> ft.Row:
-        titular = datos_factura["titular"]
-        return ft.Row(
-            controls=[
-                ft.Icon(ft.Icons.RECEIPT_LONG, color=ft.Colors.BLUE_800, size=22),
-                ft.Column(
-                    controls=[
-                        ft.Text(
-                            f"Factura — Habitación {datos_factura['habitacion'].numero}",
-                            weight="bold", size=15,
-                        ),
-                        ft.Text(
-                            titular.nombre_completo if titular else "Huésped",
-                            size=11, color=ft.Colors.GREY_600,
-                        ),
-                    ],
-                    spacing=1,
-                ),
-                ft.Container(expand=True),
-                # Tasa de cambio siempre visible en el encabezado
-                ft.Container(
-                    content=ft.Row(
-                        controls=[
-                            ft.Icon(ft.Icons.CURRENCY_EXCHANGE, size=13, color=ft.Colors.GREY_600),
-                            ft.Text(
-                                f"Tasa: Bs. {self.tasa_cambio:,.2f}",
-                                size=12, color=ft.Colors.GREY_700,
-                            ),
-                        ],
-                        spacing=5,
-                    ),
-                    bgcolor=ft.Colors.GREY_100,
-                    padding=ft.padding.symmetric(horizontal=12, vertical=5),
-                    border_radius=20,
-                ),
-            ],
-            spacing=10,
-        )
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # PANEL IZQUIERDO — FACTURA
-    # ══════════════════════════════════════════════════════════════════════════
-
-    def construir_panel_factura(self, datos_factura) -> ft.Column:
-        """
-        Construye la columna izquierda con el folio completo.
-        La parte inferior (columna_saldo) se actualiza dinámicamente con cada pago.
-        """
-        # ── Filas de consumos ────────────────────────────────────────────────
-        filas_consumos = []
-        for linea in datos_factura["lineas_consumo"]:
-            filas_consumos.append(
-                ft.Row(controls=[
-                    ft.Text(linea["concepto"],  size=11, expand=4, color=ft.Colors.BLACK87),
-                    ft.Text(
-                        f"x{linea['cantidad']}", size=10, expand=1,
-                        color=ft.Colors.GREY_600,
-                        text_align=ft.TextAlign.CENTER,
-                    ),
-                    ft.Text(
-                        f"${linea['total']:.2f}", size=11, expand=2,
-                        text_align=ft.TextAlign.RIGHT, weight="bold",
-                    ),
-                ])
-            )
-
-        # ── Filas de pagos previos (ya grabados en BD) ────────────────────────
-        filas_previas = []
-        for pago in datos_factura["pagos_previos"]:
-            filas_previas.append(
-                ft.Row(controls=[
-                    ft.Icon(ft.Icons.CHECK, size=11, color=ft.Colors.GREEN_700),
-                    ft.Text(pago.metodo.value, size=10, expand=True, color=ft.Colors.GREEN_700),
-                    ft.Text(
-                        f"-${pago.monto_usd:.2f}", size=10,
-                        color=ft.Colors.GREEN_700, text_align=ft.TextAlign.RIGHT,
-                    ),
-                ])
-            )
-
-        # Inicializar el bloque de saldo dinámico
-        self.columna_saldo.controls = self.generar_filas_saldo()
-
-        # ── Bloque de fechas ──────────────────────────────────────────────────
-        fila_fechas = ft.Row(controls=[
+    def _encabezado(self, datos) -> ft.Row:
+        titular = datos["titular"]
+        return ft.Row(controls=[
+            ft.Icon(ft.Icons.RECEIPT_LONG, color=ft.Colors.BLUE_800, size=22),
             ft.Column(controls=[
-                ft.Text("Entrada",                  size=9,  color=ft.Colors.GREY_500),
-                ft.Text(datos_factura["fecha_entrada"], size=11, weight="bold"),
+                ft.Text(
+                    f"Cobro — Habitación {datos['habitacion'].numero}",
+                    weight="bold", size=15,
+                ),
+                ft.Text(
+                    titular.nombre_completo if titular else "Huésped",
+                    size=11, color=ft.Colors.GREY_600,
+                ),
             ], spacing=1),
             ft.Container(expand=True),
-            ft.Column(controls=[
-                ft.Text("Salida",                   size=9,  color=ft.Colors.GREY_500),
-                ft.Text(datos_factura["fecha_salida"],  size=11, weight="bold"),
-            ], spacing=1, horizontal_alignment=ft.CrossAxisAlignment.END),
-        ])
-
-        # ── Construcción del cuerpo de la factura ─────────────────────────────
-        cuerpo_factura = ft.Column(
-            controls=[
-                fila_fechas,
-                ft.Divider(height=1, color=ft.Colors.GREY_300),
-                # Cabecera de la tabla
-                ft.Row(controls=[
-                    ft.Text("Concepto", size=9, weight="bold", color=ft.Colors.GREY_500, expand=4),
-                    ft.Text("Cant",     size=9, weight="bold", color=ft.Colors.GREY_500, expand=1,
-                            text_align=ft.TextAlign.CENTER),
-                    ft.Text("Total",    size=9, weight="bold", color=ft.Colors.GREY_500, expand=2,
-                            text_align=ft.TextAlign.RIGHT),
-                ]),
-                ft.Column(controls=filas_consumos, spacing=7),
-                ft.Divider(height=1, color=ft.Colors.GREY_300),
-                # Subtotal
-                ft.Row(controls=[
-                    ft.Text("Subtotal:", size=11, expand=True, color=ft.Colors.GREY_700),
-                    ft.Text(f"${datos_factura['subtotal']:.2f}", size=11,
-                            text_align=ft.TextAlign.RIGHT),
-                ]),
-                # IVA
-                ft.Row(controls=[
+            ft.Container(
+                content=ft.Row(controls=[
+                    ft.Icon(ft.Icons.CURRENCY_EXCHANGE, size=13,
+                            color=ft.Colors.GREY_600),
                     ft.Text(
-                        f"IVA ({self.porcentaje_iva:.0f}%):", size=11,
-                        expand=True, color=ft.Colors.GREY_700,
+                        f"Tasa: Bs. {self.config.tasa_cambio:,.2f}",
+                        size=12, color=ft.Colors.GREY_700,
                     ),
-                    ft.Text(f"${datos_factura['iva']:.2f}", size=11,
-                            text_align=ft.TextAlign.RIGHT),
+                ], spacing=5),
+                bgcolor=ft.Colors.GREY_100,
+                padding=ft.padding.symmetric(horizontal=12, vertical=5),
+                border_radius=20,
+            ),
+        ], spacing=10)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # PANEL IZQUIERDO — DETALLE DE LÍNEAS A COBRAR
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def _panel_factura(self, datos, lineas: list) -> ft.Column:
+        """
+        Muestra las líneas seleccionadas con tratamiento de IVA correcto:
+          · HOSPEDAJE    → precio sin IVA (se muestra tal cual)
+          · CARGO_EXTRA  → precio con IVA ya incluido (se muestra tal cual)
+          · SALDO_PENDIENTE → deuda de cobro anterior
+        """
+        tasa = self.config.tasa_cambio
+        filas_lineas = []
+
+        for linea in lineas:
+            if linea.tipo == TipoLinea.HOSPEDAJE:
+                icono      = ft.Icons.BED_OUTLINED
+                color_ico  = ft.Colors.BLUE_700
+                etiq_tipo  = "Hospedaje"
+                color_tipo = ft.Colors.BLUE_700
+            elif linea.tipo == TipoLinea.CARGO_EXTRA:
+                icono      = ft.Icons.ROOM_SERVICE
+                color_ico  = ft.Colors.ORANGE_700
+                etiq_tipo  = "Servicio (c/IVA)"
+                color_tipo = ft.Colors.ORANGE_700
+            else:
+                icono      = ft.Icons.PENDING_ACTIONS
+                color_ico  = ft.Colors.RED_700
+                etiq_tipo  = "Saldo pendiente"
+                color_tipo = ft.Colors.RED_700
+
+            filas_lineas.append(ft.Container(
+                content=ft.Row(controls=[
+                    ft.Icon(icono, size=14, color=color_ico),
+                    ft.Column(controls=[
+                        ft.Text(linea.concepto, size=11, color=ft.Colors.BLACK87),
+                        ft.Container(
+                            content=ft.Text(etiq_tipo, size=9, color=color_tipo),
+                            bgcolor=ft.Colors.with_opacity(0.1, color_tipo),
+                            padding=ft.padding.symmetric(horizontal=5, vertical=1),
+                            border_radius=4,
+                        ),
+                    ], spacing=2, expand=True),
+                    ft.Column(controls=[
+                        ft.Text(
+                            f"${linea.monto_usd:.2f}",
+                            size=12, weight="bold",
+                            text_align=ft.TextAlign.RIGHT,
+                        ),
+                        ft.Text(
+                            f"Bs.{a_bs(linea.monto_usd, tasa):,.0f}",
+                            size=9, color=ft.Colors.GREY_500,
+                            text_align=ft.TextAlign.RIGHT,
+                        ),
+                    ], spacing=1, horizontal_alignment=ft.CrossAxisAlignment.END),
+                ], spacing=8),
+                padding=ft.padding.symmetric(horizontal=8, vertical=6),
+                bgcolor=ft.Colors.WHITE,
+                border_radius=7,
+                border=ft.border.all(1, ft.Colors.GREY_100),
+            ))
+
+        # Nota de IVA mixto
+        tiene_hospedaje = any(l.tipo == TipoLinea.HOSPEDAJE for l in lineas)
+        tiene_extras    = any(l.tipo == TipoLinea.CARGO_EXTRA for l in lineas)
+        nota_iva = []
+        if tiene_hospedaje:
+            nota_iva.append("🏨 Hospedaje: precio sin IVA")
+        if tiene_extras:
+            nota_iva.append("🍽 Servicios: precio con IVA incluido")
+
+        self.columna_saldo.controls = self._filas_saldo()
+
+        cuerpo = ft.Column(controls=[
+            ft.Text("CONCEPTOS A COBRAR", size=9, weight="bold",
+                    color=ft.Colors.BLUE_GREY_400),
+            ft.Column(controls=filas_lineas, spacing=5),
+            ft.Divider(height=1, color=ft.Colors.GREY_200),
+            # Nota de IVA
+            ft.Column(controls=[
+                ft.Text(n, size=9, color=ft.Colors.GREY_500, italic=True)
+                for n in nota_iva
+            ], spacing=2) if nota_iva else ft.Container(),
+            # Total seleccionado
+            ft.Container(
+                content=ft.Row(controls=[
+                    ft.Text("TOTAL A COBRAR:", size=13, weight="bold", expand=True),
+                    ft.Column(controls=[
+                        ft.Text(
+                            f"${self.total_a_pagar:.2f}",
+                            size=18, weight="bold", color=ft.Colors.BLUE_900,
+                        ),
+                        ft.Text(
+                            f"Bs. {a_bs(self.total_a_pagar, tasa):,.2f}",
+                            size=10, color=ft.Colors.GREY_600,
+                            text_align=ft.TextAlign.RIGHT,
+                        ),
+                    ], spacing=1, horizontal_alignment=ft.CrossAxisAlignment.END),
                 ]),
-                # TOTAL con equivalente en Bs
-                ft.Container(
-                    content=ft.Row(controls=[
-                        ft.Text("TOTAL:", size=13, weight="bold", expand=True),
-                        ft.Column(controls=[
-                            ft.Text(
-                                f"${datos_factura['total']:.2f}", size=17,
-                                weight="bold", color=ft.Colors.BLUE_900,
-                            ),
-                            ft.Text(
-                                f"Bs. {datos_factura['total'] * self.tasa_cambio:,.2f}",
-                                size=10, color=ft.Colors.GREY_600,
-                                text_align=ft.TextAlign.RIGHT,
-                            ),
-                        ], spacing=1, horizontal_alignment=ft.CrossAxisAlignment.END),
-                    ]),
-                    bgcolor=ft.Colors.BLUE_50, padding=10, border_radius=8,
-                ),
-                # Pagos previos (si los hay)
-                *(
-                    [ft.Divider(height=1), ft.Column(controls=filas_previas, spacing=4)]
-                    if filas_previas else []
-                ),
-                ft.Divider(height=1, color=ft.Colors.GREY_300),
-                # Saldo dinámico (se refresca en cada pago añadido)
-                self.columna_saldo,
-            ],
-            spacing=8,
-        )
+                bgcolor=ft.Colors.BLUE_50, padding=10, border_radius=8,
+            ),
+            ft.Divider(height=1, color=ft.Colors.GREY_200),
+            self.columna_saldo,
+        ], spacing=8)
 
         return ft.Column(
-            controls=[
-                ft.Text("DETALLE DEL FOLIO", size=9, weight="bold",
-                        color=ft.Colors.BLUE_GREY_400),
-                ft.Container(
-                    content=cuerpo_factura,
-                    bgcolor=ft.Colors.WHITE,
-                    border_radius=10,
-                    border=ft.border.all(1, ft.Colors.GREY_200),
-                    padding=14,
-                ),
-            ],
+            controls=[cuerpo],
             scroll=ft.ScrollMode.AUTO, spacing=10, expand=True,
         )
 
-    def generar_filas_saldo(self) -> list:
-        """
-        Genera las filas del bloque de saldo.
-        Se llama cada vez que pagos_sesion cambia para reflejar el nuevo balance.
-        """
-        pendiente           = self.calcular_saldo_pendiente()
+    def _filas_saldo(self) -> list:
+        pendiente            = self._pendiente()
         total_abonado_sesion = sum(p["monto_usd"] for p in self.pagos_sesion)
-        filas               = []
+        tasa                 = self.config.tasa_cambio
+        filas                = []
 
-        # Subtotal abonado en esta sesión
         if self.pagos_sesion:
             filas.append(ft.Row(controls=[
-                ft.Text("Abonado ahora:", size=11, expand=True, color=ft.Colors.GREEN_700),
+                ft.Text("Abonado ahora:", size=11, expand=True,
+                        color=ft.Colors.GREEN_700),
                 ft.Column(controls=[
-                    ft.Text(
-                        f"${total_abonado_sesion:.2f}", size=12, weight="bold",
-                        color=ft.Colors.GREEN_700, text_align=ft.TextAlign.RIGHT,
-                    ),
-                    ft.Text(
-                        f"Bs. {total_abonado_sesion * self.tasa_cambio:,.2f}",
-                        size=10, color=ft.Colors.GREEN_600,
-                        text_align=ft.TextAlign.RIGHT,
-                    ),
+                    ft.Text(f"${total_abonado_sesion:.2f}", size=12, weight="bold",
+                            color=ft.Colors.GREEN_700,
+                            text_align=ft.TextAlign.RIGHT),
+                    ft.Text(f"Bs. {a_bs(total_abonado_sesion, tasa):,.2f}",
+                            size=10, color=ft.Colors.GREEN_600,
+                            text_align=ft.TextAlign.RIGHT),
                 ], spacing=1, horizontal_alignment=ft.CrossAxisAlignment.END),
             ]))
 
-        # Bloque de estado: pendiente / saldado / sobrante
         if pendiente > 0.01:
+            # Pago parcial — aviso de que quedará deuda
             filas.append(ft.Container(
                 content=ft.Column(controls=[
                     ft.Row(controls=[
@@ -473,35 +389,35 @@ class DialogoPago:
                         ft.Text(f"${pendiente:.2f}", size=15,
                                 weight="bold", color=ft.Colors.RED_700),
                     ]),
+                    ft.Text(f"Bs. {a_bs(pendiente, tasa):,.2f}", size=11,
+                            color=ft.Colors.RED_400,
+                            text_align=ft.TextAlign.RIGHT),
                     ft.Text(
-                        f"Bs. {pendiente * self.tasa_cambio:,.2f}",
-                        size=11, color=ft.Colors.RED_400,
-                        text_align=ft.TextAlign.RIGHT,
-                    ),
+                        "⚠ La diferencia quedará registrada como\n"
+                        "   saldo pendiente de esta transacción.",
+                        size=9, color=ft.Colors.RED_400, italic=True,
+                    ) if self.pagos_sesion else ft.Container(),
                 ], spacing=3),
                 bgcolor=ft.Colors.RED_50, padding=10, border_radius=8,
             ))
-
         elif pendiente < -0.01:
             sobrante = abs(pendiente)
             filas.append(ft.Container(
                 content=ft.Column(controls=[
                     ft.Row(controls=[
-                        ft.Icon(ft.Icons.ARROW_CIRCLE_UP, color=ft.Colors.ORANGE_700, size=15),
+                        ft.Icon(ft.Icons.ARROW_CIRCLE_UP,
+                                color=ft.Colors.ORANGE_700, size=15),
                         ft.Text("SOBRANTE:", size=12, weight="bold",
                                 color=ft.Colors.ORANGE_700, expand=True),
                         ft.Text(f"${sobrante:.2f}", size=15,
                                 weight="bold", color=ft.Colors.ORANGE_700),
                     ]),
-                    ft.Text(
-                        f"Bs. {sobrante * self.tasa_cambio:,.2f}",
-                        size=11, color=ft.Colors.ORANGE_400,
-                        text_align=ft.TextAlign.RIGHT,
-                    ),
+                    ft.Text(f"Bs. {a_bs(sobrante, tasa):,.2f}", size=11,
+                            color=ft.Colors.ORANGE_400,
+                            text_align=ft.TextAlign.RIGHT),
                 ], spacing=3),
                 bgcolor=ft.Colors.ORANGE_50, padding=10, border_radius=8,
             ))
-
         else:
             filas.append(ft.Container(
                 content=ft.Row(controls=[
@@ -518,12 +434,7 @@ class DialogoPago:
     # PANEL DERECHO — OPERATIVA DE COBRO
     # ══════════════════════════════════════════════════════════════════════════
 
-    def construir_panel_cobro(self) -> ft.Column:
-        """
-        Construye la columna derecha con métodos de pago, formulario activo,
-        lista de pagos de la sesión y sección de sobrante.
-        """
-        # Placeholder inicial
+    def _panel_cobro(self) -> ft.Column:
         self.area_formulario.controls = [
             ft.Container(
                 content=ft.Text(
@@ -534,34 +445,62 @@ class DialogoPago:
             )
         ]
 
-        # Botones de métodos de pago
-        botones_metodos = []
-        for metodo, config in CONFIGURACION_METODOS.items():
-            botones_metodos.append(
-                ft.ElevatedButton(
-                    text=config["etiqueta"],
-                    icon=config["icono"],
-                    style=ft.ButtonStyle(
-                        color=config["color"],
-                        bgcolor=ft.Colors.with_opacity(0.07, config["color"]),
-                        shape=ft.RoundedRectangleBorder(radius=8),
-                        side=ft.BorderSide(1.2, ft.Colors.with_opacity(0.3, config["color"])),
-                    ),
-                    height=42,
-                    on_click=lambda _, m=metodo: self.seleccionar_metodo(m),
-                )
+        botones = [
+            ft.ElevatedButton(
+                text=cfg["etiqueta"],
+                icon=cfg["icono"],
+                style=ft.ButtonStyle(
+                    color=cfg["color"],
+                    bgcolor=ft.Colors.with_opacity(0.07, cfg["color"]),
+                    shape=ft.RoundedRectangleBorder(radius=8),
+                    side=ft.BorderSide(1.2, ft.Colors.with_opacity(0.3, cfg["color"])),
+                ),
+                height=42,
+                on_click=lambda _, m=metodo: self.seleccionar_metodo(m),
             )
+            for metodo, cfg in CONFIGURACION_METODOS.items()
+        ]
+
+        # Botón de saldo a favor — solo visible si hay crédito disponible
+        saldo_disp = self.saldo_favor_disponible
+        btn_saldo_favor = ft.ElevatedButton(
+            text=f"Saldo a Favor  (${saldo_disp:.2f} disp.)",
+            icon=ft.Icons.ACCOUNT_BALANCE_WALLET,
+            style=ft.ButtonStyle(
+                color=ft.Colors.GREEN_900,
+                bgcolor=ft.Colors.with_opacity(0.1, ft.Colors.GREEN_800),
+                shape=ft.RoundedRectangleBorder(radius=8),
+                side=ft.BorderSide(1.5, ft.Colors.GREEN_700),
+            ),
+            height=42,
+            visible=saldo_disp > 0.01,
+            on_click=lambda _: self._aplicar_saldo_favor(),
+        )
+
+        btn_saldo_externo = ft.OutlinedButton(
+            text="Saldo de otro huésped",
+            icon=ft.Icons.PERSON_SEARCH,
+            style=ft.ButtonStyle(
+                color=ft.Colors.TEAL_700,
+                side=ft.BorderSide(1.2, ft.Colors.TEAL_300),
+            ),
+            height=38,
+            on_click=lambda _: self._abrir_buscador_huesped_externo(),
+        )
 
         return ft.Column(
             controls=[
                 ft.Text("MÉTODO DE PAGO", size=9, weight="bold",
                         color=ft.Colors.BLUE_GREY_400),
-                ft.Row(controls=botones_metodos, wrap=True, spacing=8, run_spacing=8),
+                ft.Row(controls=botones, wrap=True, spacing=8, run_spacing=8),
+                ft.Row(controls=[btn_saldo_favor, btn_saldo_externo],
+                       spacing=8, wrap=True),
                 ft.Divider(height=1, color=ft.Colors.GREY_200),
                 self.area_formulario,
                 ft.Divider(height=1, color=ft.Colors.GREY_200),
                 ft.Row(controls=[
-                    ft.Icon(ft.Icons.RECEIPT, size=13, color=ft.Colors.BLUE_GREY_300),
+                    ft.Icon(ft.Icons.RECEIPT, size=13,
+                            color=ft.Colors.BLUE_GREY_300),
                     ft.Text("PAGOS DE ESTA SESIÓN", size=9, weight="bold",
                             color=ft.Colors.BLUE_GREY_300),
                 ], spacing=5),
@@ -572,25 +511,19 @@ class DialogoPago:
         )
 
     # ══════════════════════════════════════════════════════════════════════════
-    # LÓGICA DE INTERACCIÓN
+    # INTERACCIÓN — SELECCIÓN DE MÉTODO Y ENTRADA DE MONTO
     # ══════════════════════════════════════════════════════════════════════════
 
     def seleccionar_metodo(self, metodo: MetodoPago):
-        """
-        Muestra el formulario de entrada adaptado al método seleccionado.
-        Pre-rellena automáticamente con el saldo pendiente como monto sugerido.
-        """
-        self.metodo_seleccionado = metodo
-        config  = CONFIGURACION_METODOS[metodo]
-        es_bs   = config["es_bs"]
+        cfg                 = CONFIGURACION_METODOS[metodo]
+        es_bs               = cfg["es_bs"]
         necesita_referencia = metodo not in [MetodoPago.CASH_USD, MetodoPago.CASH_BS]
+        tasa                = self.config.tasa_cambio
 
-        # Monto sugerido: el pendiente actual en la moneda del método
-        pendiente = self.calcular_saldo_pendiente()
+        pendiente = self._pendiente()
         if pendiente > 0:
             valor_sugerido = (
-                f"{pendiente * self.tasa_cambio:.2f}" if es_bs
-                else f"{pendiente:.2f}"
+                f"{a_bs(pendiente, tasa):.2f}" if es_bs else f"{pendiente:.2f}"
             )
         else:
             valor_sugerido = "0.00"
@@ -601,38 +534,35 @@ class DialogoPago:
             suffix_text="Bs." if es_bs else "USD",
             keyboard_type=ft.KeyboardType.NUMBER,
             text_align=ft.TextAlign.RIGHT,
-            autofocus=True,
-            expand=True,
+            autofocus=True, expand=True,
         )
         campo_referencia = ft.TextField(
             label="Nro. Referencia / Confirmación",
-            visible=necesita_referencia,
-            expand=True,
+            visible=necesita_referencia, expand=True,
         )
 
         def agregar_este_pago(evento):
-            """Valida e incorpora el pago a la lista de la sesión."""
             try:
-                valor_ingresado = float(campo_monto.value.replace(",", ".") or 0)
-                if valor_ingresado <= 0:
+                valor = float(campo_monto.value.replace(",", ".") or 0)
+                if valor <= 0:
                     campo_monto.error_text = "Ingrese un monto válido"
                     campo_monto.update()
                     return
                 campo_monto.error_text = None
 
-                monto_usd = valor_ingresado / self.tasa_cambio if es_bs else valor_ingresado
-                monto_bs  = valor_ingresado if es_bs else valor_ingresado * self.tasa_cambio
+                monto_usd = a_usd(valor, tasa) if es_bs else valor
+                monto_bs  = valor              if es_bs else a_bs(valor, tasa)
 
                 self.pagos_sesion.append({
-                    "metodo":     metodo,
-                    "monto_usd":  monto_usd,
-                    "monto_bs":   monto_bs,
-                    "referencia": campo_referencia.value.strip() if necesita_referencia else "",
-                    "etiqueta":   config["etiqueta"],
-                    "color":      config["color"],
-                    "icono":      config["icono"],
-                    # Texto legible para mostrar en la lista de pagos de la sesión
-                    "visualizacion": f"Bs. {valor_ingresado:,.2f}" if es_bs else f"${valor_ingresado:.2f}",
+                    "metodo":        metodo,
+                    "monto_usd":     monto_usd,
+                    "monto_bs":      monto_bs,
+                    "referencia":    campo_referencia.value.strip()
+                                     if necesita_referencia else "",
+                    "etiqueta":      cfg["etiqueta"],
+                    "color":         cfg["color"],
+                    "icono":         cfg["icono"],
+                    "visualizacion": f"Bs. {valor:,.2f}" if es_bs else f"${valor:.2f}",
                 })
                 self.refrescar_interfaz()
 
@@ -640,88 +570,81 @@ class DialogoPago:
                 campo_monto.error_text = "Número inválido"
                 campo_monto.update()
 
-        # Fila de campos según si necesita referencia
-        fila_campos = [campo_monto, campo_referencia] if necesita_referencia else [campo_monto]
+        fila_campos = (
+            [campo_monto, campo_referencia] if necesita_referencia else [campo_monto]
+        )
 
         self.area_formulario.controls = [
             ft.Container(
                 content=ft.Column(controls=[
                     ft.Row(controls=[
-                        ft.Icon(config["icono"], color=config["color"], size=18),
-                        ft.Text(config["etiqueta"], weight="bold",
-                                color=config["color"], size=13),
+                        ft.Icon(cfg["icono"], color=cfg["color"], size=18),
+                        ft.Text(cfg["etiqueta"], weight="bold",
+                                color=cfg["color"], size=13),
                     ], spacing=6),
                     ft.Row(controls=fila_campos, spacing=10),
                     ft.ElevatedButton(
                         "+ AGREGAR PAGO",
-                        bgcolor=config["color"], color=ft.Colors.WHITE,
+                        bgcolor=cfg["color"], color=ft.Colors.WHITE,
                         on_click=agregar_este_pago,
                         expand=True, height=40,
                     ),
                 ], spacing=10),
                 padding=14,
-                bgcolor=ft.Colors.with_opacity(0.04, config["color"]),
+                bgcolor=ft.Colors.with_opacity(0.04, cfg["color"]),
                 border_radius=10,
-                border=ft.border.all(1.5, ft.Colors.with_opacity(0.25, config["color"])),
+                border=ft.border.all(1.5, ft.Colors.with_opacity(0.25, cfg["color"])),
             )
         ]
         self.pagina.update()
 
     def refrescar_interfaz(self):
-        """
-        Actualiza todos los widgets dinámicos tras cualquier cambio en pagos_sesion.
-        Es el único punto desde donde se actualizan la factura y el panel de cobro
-        para mantener consistencia visual.
-        """
-        # 1. Actualizar el bloque de saldo en el panel izquierdo
-        self.columna_saldo.controls = self.generar_filas_saldo()
+        """Actualiza saldo, lista de pagos y estado del botón finalizar."""
+        self.columna_saldo.controls = self._filas_saldo()
 
-        # 2. Reconstruir la lista de pagos de la sesión
-        self.columna_pagos_sesion.controls = []
-        for indice, pago in enumerate(self.pagos_sesion):
-            self.columna_pagos_sesion.controls.append(
-                ft.Container(
-                    content=ft.Row(controls=[
-                        ft.Icon(pago["icono"], size=14, color=pago["color"]),
-                        ft.Text(pago["etiqueta"], size=12, expand=True),
-                        ft.Text(pago["visualizacion"], size=12, weight="bold"),
-                        ft.Text(
-                            f"  (${pago['monto_usd']:.2f})",
-                            size=10, color=ft.Colors.GREY_600,
-                        ),
-                        ft.IconButton(
-                            ft.Icons.REMOVE_CIRCLE_OUTLINE,
-                            icon_size=15,
-                            icon_color=ft.Colors.RED_400,
-                            tooltip="Quitar este pago",
-                            on_click=lambda _, i=indice: self.quitar_pago(i),
-                        ),
-                    ], spacing=4),
-                    padding=ft.padding.symmetric(horizontal=10, vertical=5),
-                    bgcolor=ft.Colors.with_opacity(0.06, pago["color"]),
-                    border_radius=7,
-                )
+        self.columna_pagos_sesion.controls = [
+            ft.Container(
+                content=ft.Row(controls=[
+                    ft.Icon(p["icono"], size=14, color=p["color"]),
+                    ft.Text(p["etiqueta"], size=12, expand=True),
+                    ft.Text(p["visualizacion"], size=12, weight="bold"),
+                    ft.Text(f"  (${p['monto_usd']:.2f})", size=10,
+                            color=ft.Colors.GREY_600),
+                    ft.IconButton(
+                        ft.Icons.REMOVE_CIRCLE_OUTLINE,
+                        icon_size=15, icon_color=ft.Colors.RED_400,
+                        tooltip="Quitar este pago",
+                        on_click=lambda _, i=idx: self.quitar_pago(i),
+                    ),
+                ], spacing=4),
+                padding=ft.padding.symmetric(horizontal=10, vertical=5),
+                bgcolor=ft.Colors.with_opacity(0.06, p["color"]),
+                border_radius=7,
             )
+            for idx, p in enumerate(self.pagos_sesion)
+        ]
 
-        # 3. Evaluar el saldo y configurar el botón de finalizar
-        pendiente = self.calcular_saldo_pendiente()
+        pendiente = self._pendiente()
 
         if pendiente < -0.01:
-            # Hay sobrante: mostrar opciones de vuelto o crédito
+            # Sobrante: el cliente pagó más de lo seleccionado
             self.mostrar_seccion_sobrante(abs(pendiente))
             self.btn_finalizar.disabled = False
             self.btn_finalizar.bgcolor  = ft.Colors.ORANGE_700
             self.btn_finalizar.text     = "CONFIRMAR Y GESTIONAR SOBRANTE"
-
-        elif abs(pendiente) <= 0.01 and self.pagos_sesion:
-            # Pago exacto: habilitar finalizar
+        elif self.pagos_sesion:
+            # Saldado exactamente o pago parcial (pendiente >= 0)
             self.seccion_sobrante.visible = False
             self.btn_finalizar.disabled   = False
-            self.btn_finalizar.bgcolor    = ft.Colors.GREEN_700
-            self.btn_finalizar.text       = "FINALIZAR COBRO"
-
+            self.btn_finalizar.bgcolor    = (
+                ft.Colors.GREEN_700 if abs(pendiente) <= 0.01
+                else ft.Colors.BLUE_700        # azul = pago parcial permitido
+            )
+            self.btn_finalizar.text = (
+                "FINALIZAR COBRO" if abs(pendiente) <= 0.01
+                else f"COBRAR PARCIAL (quedan ${pendiente:.2f})"
+            )
         else:
-            # Aún falta dinero por cobrar
             self.seccion_sobrante.visible = False
             self.btn_finalizar.disabled   = True
             self.btn_finalizar.bgcolor    = ft.Colors.GREY_400
@@ -730,7 +653,6 @@ class DialogoPago:
         self.pagina.update()
 
     def quitar_pago(self, indice: int):
-        """Elimina un pago de la sesión actual y refresca la interfaz."""
         self.pagos_sesion.pop(indice)
         self.refrescar_interfaz()
 
@@ -739,13 +661,8 @@ class DialogoPago:
     # ══════════════════════════════════════════════════════════════════════════
 
     def mostrar_seccion_sobrante(self, sobrante_usd: float):
-        """
-        Construye y muestra la sección de sobrante.
-        Ofrece dos modos:
-          - Crédito: el sobrante queda asociado al Huesped (persiste entre estadías).
-          - Vuelto:  desglose multimoneda / multicaja para devolver el efectivo.
-        """
-        sobrante_bs = sobrante_usd * self.tasa_cambio
+        tasa        = self.config.tasa_cambio
+        sobrante_bs = a_bs(sobrante_usd, tasa)
 
         self.radio_tipo_sobrante = ft.RadioGroup(
             content=ft.Column(controls=[
@@ -758,50 +675,42 @@ class DialogoPago:
                 ),
                 ft.Radio(value="vuelto", label="Entregar vuelto en este momento"),
             ]),
-            value="credito",  # Por defecto, crédito (más seguro operativamente)
+            value="credito",
         )
 
-        # ── Campos de desglose del vuelto ─────────────────────────────────────
-        campo_principal_usd = ft.TextField(
-            label="Caja Ppal. $",  value=f"{sobrante_usd:.2f}",
-            width=120, text_align=ft.TextAlign.RIGHT,
-        )
-        campo_chica_usd = ft.TextField(
-            label="Caja Chica $", value="0.00",
-            width=120, text_align=ft.TextAlign.RIGHT,
-        )
-        campo_principal_bs = ft.TextField(
-            label="Ppal. Bs",     value="0.00",
-            width=120, text_align=ft.TextAlign.RIGHT,
-        )
-        campo_chica_bs = ft.TextField(
-            label="Chica Bs",     value="0.00",
-            width=120, text_align=ft.TextAlign.RIGHT,
-        )
+        campo_ppal_usd   = ft.TextField(label="Caja Ppal. $",
+                                        value=f"{sobrante_usd:.2f}", width=120,
+                                        text_align=ft.TextAlign.RIGHT)
+        campo_chica_usd  = ft.TextField(label="Caja Chica $", value="0.00", width=120,
+                                        text_align=ft.TextAlign.RIGHT)
+        campo_ppal_bs    = ft.TextField(label="Ppal. Bs",     value="0.00", width=120,
+                                        text_align=ft.TextAlign.RIGHT)
+        campo_chica_bs   = ft.TextField(label="Chica Bs",     value="0.00", width=120,
+                                        text_align=ft.TextAlign.RIGHT)
         texto_diferencia = ft.Text("", size=11)
 
         self.campos_desglose_vuelto = (
-            campo_principal_usd, campo_chica_usd, campo_principal_bs, campo_chica_bs
+            campo_ppal_usd, campo_chica_usd, campo_ppal_bs, campo_chica_bs
         )
         self.monto_sobrante_usd = sobrante_usd
 
         def validar_desglose(evento):
-            """Verifica que la suma del desglose cuadre exactamente con el sobrante."""
             try:
-                total_desglosado = (
-                    float(campo_principal_usd.value or 0)
-                    + float(campo_chica_usd.value    or 0)
-                    + (
-                        float(campo_principal_bs.value or 0)
-                        + float(campo_chica_bs.value    or 0)
-                    ) / self.tasa_cambio
+                total = (
+                    float(campo_ppal_usd.value  or 0)
+                    + float(campo_chica_usd.value or 0)
+                    + a_usd(
+                        float(campo_ppal_bs.value  or 0)
+                        + float(campo_chica_bs.value or 0),
+                        tasa,
+                    )
                 )
-                diferencia = sobrante_usd - total_desglosado
-                if abs(diferencia) < 0.02:
+                diff = round(sobrante_usd - total, 2)
+                if abs(diff) < 0.02:
                     texto_diferencia.value = "Distribución correcta"
                     texto_diferencia.color = ft.Colors.GREEN_700
                 else:
-                    texto_diferencia.value = f"Diferencia: ${diferencia:.2f}"
+                    texto_diferencia.value = f"Diferencia: ${diff:.2f}"
                     texto_diferencia.color = ft.Colors.RED_700
                 self.pagina.update()
             except Exception:
@@ -810,22 +719,14 @@ class DialogoPago:
         for campo in self.campos_desglose_vuelto:
             campo.on_change = validar_desglose
 
-        desglose_vuelto = ft.Column(
-            controls=[
-                ft.Text("Distribución del vuelto por caja/moneda:",
-                        size=11, color=ft.Colors.GREY_700),
-                ft.Row(
-                    controls=[
-                        campo_principal_usd, campo_chica_usd,
-                        campo_principal_bs,  campo_chica_bs,
-                    ],
-                    spacing=8, wrap=True,
-                ),
-                texto_diferencia,
-            ],
-            spacing=6,
-            visible=False,  # Solo visible cuando el modo es "vuelto"
-        )
+        desglose_vuelto = ft.Column(controls=[
+            ft.Text("Distribución del vuelto por caja/moneda:",
+                    size=11, color=ft.Colors.GREY_700),
+            ft.Row(controls=[campo_ppal_usd, campo_chica_usd,
+                              campo_ppal_bs,  campo_chica_bs],
+                   spacing=8, wrap=True),
+            texto_diferencia,
+        ], spacing=6, visible=False)
 
         def al_cambiar_modo(evento):
             desglose_vuelto.visible = (self.radio_tipo_sobrante.value == "vuelto")
@@ -837,7 +738,8 @@ class DialogoPago:
         self.seccion_sobrante.content = ft.Container(
             content=ft.Column(controls=[
                 ft.Row(controls=[
-                    ft.Icon(ft.Icons.INFO_OUTLINE, color=ft.Colors.ORANGE_700, size=16),
+                    ft.Icon(ft.Icons.INFO_OUTLINE,
+                            color=ft.Colors.ORANGE_700, size=16),
                     ft.Text(
                         f"Sobrante: ${sobrante_usd:.2f}  ·  Bs. {sobrante_bs:,.2f}",
                         weight="bold", color=ft.Colors.ORANGE_700, size=13,
@@ -846,9 +748,7 @@ class DialogoPago:
                 self.radio_tipo_sobrante,
                 desglose_vuelto,
             ], spacing=10),
-            bgcolor=ft.Colors.ORANGE_50,
-            padding=14,
-            border_radius=10,
+            bgcolor=ft.Colors.ORANGE_50, padding=14, border_radius=10,
             border=ft.border.all(1, ft.Colors.ORANGE_200),
         )
 
@@ -856,82 +756,449 @@ class DialogoPago:
     # PERSISTENCIA — TRANSACCIÓN FINAL
     # ══════════════════════════════════════════════════════════════════════════
 
+
+    def _aplicar_saldo_favor(self):
+        """
+        Aplica el saldo a favor disponible en la estadía como un pago.
+        Solo aplica hasta cubrir el pendiente — no genera sobrante por saldo.
+        """
+        pendiente   = self._pendiente()
+        disponible  = self.saldo_favor_disponible
+        if disponible <= 0.01 or pendiente <= 0.01:
+            return
+
+        monto_aplicar = round(min(disponible, pendiente), 2)
+        tasa          = self.config.tasa_cambio
+
+        self.pagos_sesion.append({
+            "metodo":        MetodoPago.SALDO_FAVOR,
+            "monto_usd":     monto_aplicar,
+            "monto_bs":      a_bs(monto_aplicar, tasa),
+            "referencia":    "",
+            "etiqueta":      "Saldo a Favor",
+            "color":         ft.Colors.GREEN_800,
+            "icono":         ft.Icons.ACCOUNT_BALANCE_WALLET,
+            "visualizacion": f"${monto_aplicar:.2f}",
+            "es_saldo_favor": True,   # flag para tratamiento especial en finalizar_cobro
+        })
+        self.refrescar_interfaz()
+
+
+    def _saldo_real_huesped(self, sesion, huesped_id: int) -> float:
+        """
+        Calcula el saldo total disponible de un huésped en tiempo real:
+          · Huesped.credito_usd          → crédito persistente (sin estadía activa)
+          · SUM(Estadia.deposito_usd)    → depósitos en estadías activas
+        Excluye la estadía actual para no contar dos veces.
+        """
+        from database.models import Huesped as HuespedModel
+        huesped = sesion.get(HuespedModel, huesped_id)
+        if not huesped:
+            return 0.0
+
+        credito_base = huesped.credito_usd or 0.0
+
+        # Estadías activas del huésped (excepto la estadía actual)
+        from sqlalchemy.orm import selectinload as _sl
+        estadias_activas = (
+            sesion.query(Estadia)
+            .options(_sl(Estadia.huespedes))
+            .filter(
+                Estadia.activa       == True,
+                Estadia.id           != self.id_estadia,
+                Estadia.deposito_usd >  0,
+            )
+            .all()
+        )
+        deposito_estadias = sum(
+            e.deposito_usd
+            for e in estadias_activas
+            if any(h.id == huesped_id for h in e.huespedes)
+        )
+
+        return round(credito_base + deposito_estadias, 2)
+
+    def _abrir_buscador_huesped_externo(self):
+        """
+        Abre un diálogo para buscar un huésped por documento o nombre,
+        ver su saldo disponible y aplicarlo como pago a esta cuenta.
+        El origen del saldo queda registrado en la descripción del Pago.
+        """
+        from database.models import Huesped as HuespedModel
+
+        campo_busqueda = ft.TextField(
+            label="Buscar por documento o nombre",
+            prefix_icon=ft.Icons.SEARCH,
+            autofocus=True,
+            expand=True,
+        )
+        lista_resultados  = ft.Column(spacing=6, scroll=ft.ScrollMode.AUTO)
+        texto_sin_resultados = ft.Text(
+            "Ingresa el documento o nombre para buscar",
+            size=12, color=ft.Colors.GREY_400, italic=True,
+        )
+        lista_resultados.controls = [texto_sin_resultados]
+
+        # Huésped seleccionado y su saldo
+        seleccion = {"huesped_id": None, "nombre": "", "saldo": 0.0,
+                     "estadia_origen_id": None}
+
+        campo_monto_ext = ft.TextField(
+            label="Monto a aplicar (USD)",
+            prefix_text="$ ",
+            keyboard_type=ft.KeyboardType.NUMBER,
+            text_align=ft.TextAlign.RIGHT,
+            visible=False,
+            width=160,
+        )
+        texto_saldo_ext = ft.Text("", size=12, color=ft.Colors.GREEN_700,
+                                   weight="bold", visible=False)
+        btn_aplicar_ext = ft.ElevatedButton(
+            "Aplicar saldo",
+            icon=ft.Icons.CHECK,
+            bgcolor=ft.Colors.TEAL_700, color=ft.Colors.WHITE,
+            visible=False,
+        )
+
+        def buscar(evento):
+            termino = campo_busqueda.value.strip()
+            if len(termino) < 2:
+                lista_resultados.controls = [texto_sin_resultados]
+                lista_resultados.update()
+                return
+
+            sesion = SesionLocal()
+            try:
+                from database.models import Huesped as HM
+                resultados = (
+                    sesion.query(HM)
+                    .filter(
+                        (HM.documento.ilike(f"%{termino}%")) |
+                        (HM.nombre.ilike(f"%{termino}%"))    |
+                        (HM.apellido.ilike(f"%{termino}%"))
+                    )
+                    .limit(8)
+                    .all()
+                )
+
+                if not resultados:
+                    lista_resultados.controls = [
+                        ft.Text("Sin resultados", size=12,
+                                color=ft.Colors.GREY_400, italic=True)
+                    ]
+                else:
+                    filas = []
+                    for h in resultados:
+                        saldo = self._saldo_real_huesped(sesion, h.id)
+                        filas.append(ft.Container(
+                            content=ft.Row([
+                                ft.Column([
+                                    ft.Text(h.nombre_completo, size=12,
+                                            weight="bold"),
+                                    ft.Text(f"Doc: {h.documento}", size=10,
+                                            color=ft.Colors.GREY_600),
+                                ], spacing=1, expand=True),
+                                ft.Text(
+                                    f"${saldo:.2f}",
+                                    size=13, weight="bold",
+                                    color=ft.Colors.GREEN_700 if saldo > 0.01
+                                    else ft.Colors.GREY_400,
+                                ),
+                                ft.IconButton(
+                                    ft.Icons.ARROW_FORWARD_IOS,
+                                    icon_size=14,
+                                    disabled=saldo <= 0.01,
+                                    tooltip="Seleccionar este huésped",
+                                    on_click=lambda _, hid=h.id,
+                                                    nombre=h.nombre_completo,
+                                                    s=saldo: seleccionar_huesped(
+                                                        hid, nombre, s
+                                                    ),
+                                ),
+                            ], spacing=6,
+                               vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                            padding=ft.padding.symmetric(horizontal=10, vertical=7),
+                            bgcolor=ft.Colors.WHITE,
+                            border_radius=8,
+                            border=ft.border.all(1, ft.Colors.GREY_100),
+                        ))
+                    lista_resultados.controls = filas
+            finally:
+                sesion.close()
+            lista_resultados.update()
+
+        def seleccionar_huesped(hid: int, nombre: str, saldo: float):
+            seleccion["huesped_id"] = hid
+            seleccion["nombre"]     = nombre
+            seleccion["saldo"]      = saldo
+
+            pendiente = self._pendiente()
+            monto_sug = round(min(saldo, max(pendiente, 0)), 2)
+
+            campo_monto_ext.value   = f"{monto_sug:.2f}"
+            campo_monto_ext.visible = True
+            texto_saldo_ext.value   = (
+                f"Saldo disponible de {nombre}: ${saldo:.2f}"
+            )
+            texto_saldo_ext.visible = True
+            btn_aplicar_ext.visible = True
+            self.pagina.update()
+
+        def confirmar_aplicacion(evento):
+            hid    = seleccion["huesped_id"]
+            nombre = seleccion["nombre"]
+            saldo  = seleccion["saldo"]
+            if not hid:
+                return
+            try:
+                monto = round(float(campo_monto_ext.value or 0), 2)
+            except ValueError:
+                return
+            if monto <= 0 or monto > saldo + 0.01:
+                campo_monto_ext.error_text = (
+                    f"Máximo disponible: ${saldo:.2f}"
+                )
+                campo_monto_ext.update()
+                return
+
+            tasa = self.config.tasa_cambio
+            self.pagos_sesion.append({
+                "metodo":           MetodoPago.SALDO_FAVOR,
+                "monto_usd":        monto,
+                "monto_bs":         a_bs(monto, tasa),
+                "referencia":       "",
+                "etiqueta":         f"Saldo a Favor ({nombre})",
+                "color":            ft.Colors.TEAL_700,
+                "icono":            ft.Icons.PERSON_PIN,
+                "visualizacion":    f"${monto:.2f}",
+                "es_saldo_favor":   True,
+                "huesped_externo_id": hid,
+                "huesped_externo_nombre": nombre,
+                "descripcion_extra": (
+                    f"Saldo aplicado del huésped {nombre} "
+                    f"(doc: {seleccion.get('doc', '—')}) "
+                    f"a esta cuenta"
+                ),
+            })
+            self.pagina.close(modal_buscador)
+            self.refrescar_interfaz()
+
+        btn_aplicar_ext.on_click = confirmar_aplicacion
+        campo_busqueda.on_change = buscar
+
+        modal_buscador = ft.AlertDialog(
+            title=ft.Row([
+                ft.Icon(ft.Icons.PERSON_SEARCH, color=ft.Colors.TEAL_700),
+                ft.Text("Aplicar saldo de otro huésped", weight="bold"),
+            ], spacing=8),
+            content=ft.Container(
+                content=ft.Column([
+                    campo_busqueda,
+                    ft.Container(
+                        content=lista_resultados,
+                        height=180,
+                        border=ft.border.all(1, ft.Colors.GREY_200),
+                        border_radius=8,
+                        padding=8,
+                    ),
+                    ft.Divider(),
+                    texto_saldo_ext,
+                    ft.Row([campo_monto_ext, btn_aplicar_ext],
+                           spacing=10,
+                           alignment=ft.MainAxisAlignment.START),
+                ], spacing=10, tight=True),
+                width=420,
+            ),
+            actions=[
+                ft.TextButton(
+                    "Cancelar",
+                    on_click=lambda _: self.pagina.close(modal_buscador),
+                ),
+            ],
+        )
+        self.pagina.open(modal_buscador)
+
     def finalizar_cobro(self, evento):
         """
-        Graba todos los pagos de la sesión y gestiona el sobrante
-        en una única transacción atómica.
-        Si algo falla, hace rollback completo para no dejar la BD inconsistente.
+        Graba los pagos, crea la TransaccionCobro, cierra las líneas seleccionadas
+        y, si hubo pago parcial, crea una nueva LineaCuenta SALDO_PENDIENTE.
+        Todo en una única transacción atómica.
         """
+        if not self.pagos_sesion:
+            return
+
         sesion = SesionLocal()
         try:
             caja = sesion.query(Caja).first()
             if not caja:
-                raise Exception("No se encontró el registro de caja en la base de datos.")
+                raise Exception("No se encontró el registro de caja.")
 
-            # ── 1. Registrar todos los pagos de la sesión ─────────────────────
+            tasa             = self.config.tasa_cambio
+            total_pagado_usd = sum(p["monto_usd"] for p in self.pagos_sesion)
+            pendiente        = self._pendiente()   # >0 pago parcial, <0 sobrante
+
+            # ── 1. Registrar pagos y actualizar caja ─────────────────────────
+            estadia_bd_cobro = sesion.get(Estadia, self.id_estadia)
             for pago in self.pagos_sesion:
+                descripcion_pago = pago.get(
+                    "descripcion_extra", "Cobro de factura"
+                )
                 sesion.add(Pago(
                     estadia_id    = self.id_estadia,
                     monto_usd     = pago["monto_usd"],
                     monto_bs      = pago["monto_bs"],
-                    tasa_cambio   = self.tasa_cambio,
+                    tasa_cambio   = tasa,
                     metodo        = pago["metodo"],
                     referencia    = pago["referencia"] or "—",
-                    descripcion   = "Cobro de factura",
+                    descripcion   = descripcion_pago,
                     creado_en     = datetime.now(),
                     es_devolucion = False,
                 ))
+                if pago.get("es_saldo_favor"):
+                    monto_sf = pago["monto_usd"]
+                    huesped_ext_id = pago.get("huesped_externo_id")
+                    nombre_ext     = pago.get("huesped_externo_nombre", "")
 
-                # Actualizar saldo de caja según la moneda del método
-                if pago["metodo"] in [MetodoPago.CASH_USD, MetodoPago.ZELLE, MetodoPago.DEBIT_CARD]:
+                    if huesped_ext_id:
+                        # ── Saldo de huésped externo ──────────────────────
+                        # 1. Descontar de estadías activas del huésped externo primero
+                        from sqlalchemy.orm import selectinload as _sl2
+                        estadias_ext = (
+                            sesion.query(Estadia)
+                            .options(_sl2(Estadia.huespedes))
+                            .filter(
+                                Estadia.activa       == True,
+                                Estadia.id           != self.id_estadia,
+                                Estadia.deposito_usd >  0,
+                            )
+                            .all()
+                        )
+                        restante = monto_sf
+                        for est_ext in estadias_ext:
+                            if not any(h.id == huesped_ext_id
+                                       for h in est_ext.huespedes):
+                                continue
+                            descuento = min(restante,
+                                           est_ext.deposito_usd or 0.0)
+                            est_ext.deposito_usd = max(
+                                0.0,
+                                (est_ext.deposito_usd or 0.0) - descuento
+                            )
+                            restante = round(restante - descuento, 2)
+                            if restante <= 0.01:
+                                break
+                        # 2. Si queda algo, descontar del crédito persistente
+                        if restante > 0.01:
+                            huesped_ext = sesion.get(Huesped, huesped_ext_id)
+                            if huesped_ext:
+                                huesped_ext.credito_usd = max(
+                                    0.0,
+                                    (huesped_ext.credito_usd or 0.0) - restante
+                                )
+                        # Actualizar descripción con trazabilidad
+                        pago["descripcion_extra"] = (
+                            f"Saldo aplicado del huésped {nombre_ext} "
+                            f"a Hab. de estadía #{self.id_estadia}"
+                        )
+                    else:
+                        # ── Saldo propio de la estadía actual ─────────────
+                        if estadia_bd_cobro:
+                            estadia_bd_cobro.deposito_usd = max(
+                                0.0,
+                                (estadia_bd_cobro.deposito_usd or 0.0) - monto_sf
+                            )
+                            self.saldo_favor_disponible = (
+                                estadia_bd_cobro.deposito_usd
+                            )
+                elif pago["metodo"] in [
+                    MetodoPago.CASH_USD, MetodoPago.ZELLE, MetodoPago.DEBIT_CARD
+                ]:
                     caja.saldo_principal_usd += pago["monto_usd"]
                 else:
-                    # Bs (efectivo, transferencia, pago móvil)
-                    caja.saldo_principal_bs += pago["monto_bs"]
+                    caja.saldo_principal_bs  += pago["monto_bs"]
 
-            # ── 2. Gestionar el sobrante si lo hay ────────────────────────────
-            pendiente = self.calcular_saldo_pendiente()
-            if pendiente < -0.01:
+            # ── 2. Crear TransaccionCobro ─────────────────────────────────────
+            saldo_pendiente_tx = max(0.0, round(pendiente, 2))
+            transaccion = TransaccionCobro(
+                estadia_id         = self.id_estadia,
+                total_seleccionado = self.total_a_pagar,
+                total_pagado       = round(total_pagado_usd, 2),
+                saldo_pendiente    = saldo_pendiente_tx,
+                creado_en          = datetime.now(),
+            )
+            sesion.add(transaccion)
+            sesion.flush()   # obtener transaccion.id
+
+            # ── 3. Marcar líneas seleccionadas como canceladas ────────────────
+            for linea_id in self.lineas_ids:
+                linea = sesion.get(LineaCuenta, linea_id)
+                if linea:
+                    linea.cancelada      = True
+                    linea.transaccion_id = transaccion.id
+
+            # ── 4. Pago parcial → crear LineaCuenta SALDO_PENDIENTE ───────────
+            if saldo_pendiente_tx > 0.01:
+                conceptos = []
+                for linea_id in self.lineas_ids:
+                    linea = sesion.get(LineaCuenta, linea_id)
+                    if linea:
+                        conceptos.append(linea.concepto)
+                resumen = "; ".join(conceptos[:3])
+                if len(conceptos) > 3:
+                    resumen += f" (+{len(conceptos)-3} más)"
+
+                sesion.add(LineaCuenta(
+                    estadia_id     = self.id_estadia,
+                    transaccion_id = transaccion.id,
+                    tipo           = TipoLinea.SALDO_PENDIENTE,
+                    concepto       = (
+                        f"Saldo pendiente de cobro — {resumen}"
+                    ),
+                    monto_usd      = saldo_pendiente_tx,
+                    cancelada      = False,
+                    creado_en      = datetime.now(),
+                ))
+
+            # ── 5. Gestionar sobrante (el cliente pagó de más) ───────────────
+            elif pendiente < -0.01:
                 monto_sobrante = abs(pendiente)
                 ultimo_metodo  = (
                     self.pagos_sesion[-1]["metodo"] if self.pagos_sesion
                     else MetodoPago.CASH_USD
                 )
 
-                if self.radio_tipo_sobrante and self.radio_tipo_sobrante.value == "credito":
-                    # ── Modo crédito: el saldo queda en el Huesped ────────────
-                    # Persiste entre estadías mediante el campo credito_usd en Huesped.
+                if (self.radio_tipo_sobrante
+                        and self.radio_tipo_sobrante.value == "credito"):
                     estadia_bd = sesion.get(Estadia, self.id_estadia)
                     if estadia_bd and estadia_bd.huespedes:
                         huesped = sesion.get(Huesped, estadia_bd.huespedes[0].id)
                         if huesped:
-                            credito_actual = huesped.credito_usd or 0.0
-                            huesped.credito_usd = credito_actual + monto_sobrante
-
-                    # También se refleja en la estadía actual para que el folio cuadre
+                            huesped.credito_usd = (
+                                (huesped.credito_usd or 0.0) + monto_sobrante
+                            )
                     if estadia_bd:
                         estadia_bd.deposito_usd += monto_sobrante
 
                     sesion.add(Pago(
                         estadia_id    = self.id_estadia,
                         monto_usd     = monto_sobrante,
-                        monto_bs      = monto_sobrante * self.tasa_cambio,
+                        monto_bs      = a_bs(monto_sobrante, tasa),
                         es_devolucion = True,
                         metodo        = ultimo_metodo,
-                        tasa_cambio   = self.tasa_cambio,
-                        descripcion   = "Sobrante registrado como saldo a favor del huésped",
+                        tasa_cambio   = tasa,
+                        descripcion   = "Sobrante registrado como saldo a favor",
                         creado_en     = datetime.now(),
                     ))
 
                 else:
-                    # ── Modo vuelto en efectivo ────────────────────────────────
-                    c_ppal, c_chica, c_ppal_bs, c_chica_bs = self.campos_desglose_vuelto
-                    val_ppal    = float(c_ppal.value    or 0)
-                    val_chica   = float(c_chica.value   or 0)
-                    val_ppal_bs = float(c_ppal_bs.value or 0)
+                    c_ppal, c_chica, c_ppal_bs, c_chica_bs = (
+                        self.campos_desglose_vuelto
+                    )
+                    val_ppal     = float(c_ppal.value    or 0)
+                    val_chica    = float(c_chica.value   or 0)
+                    val_ppal_bs  = float(c_ppal_bs.value or 0)
                     val_chica_bs = float(c_chica_bs.value or 0)
 
-                    # Validar fondos disponibles antes de descontar
                     if caja.saldo_principal_usd < val_ppal:
                         raise Exception("Fondos insuficientes — Caja Principal $")
                     if caja.caja_chica_usd < val_chica:
@@ -942,32 +1209,36 @@ class DialogoPago:
                         raise Exception("Fondos insuficientes — Caja Chica Bs")
 
                     caja.saldo_principal_usd -= val_ppal
-                    caja.caja_chica_usd       -= val_chica
-                    caja.saldo_principal_bs   -= val_ppal_bs
-                    caja.caja_chica_bs        -= val_chica_bs
+                    caja.caja_chica_usd      -= val_chica
+                    caja.saldo_principal_bs  -= val_ppal_bs
+                    caja.caja_chica_bs       -= val_chica_bs
 
                     sesion.add(Pago(
                         estadia_id    = self.id_estadia,
                         monto_usd     = monto_sobrante,
-                        monto_bs      = monto_sobrante * self.tasa_cambio,
+                        monto_bs      = a_bs(monto_sobrante, tasa),
                         es_devolucion = True,
                         metodo        = ultimo_metodo,
-                        tasa_cambio   = self.tasa_cambio,
+                        tasa_cambio   = tasa,
                         descripcion   = (
-                            f"Vuelto multimoneda — "
-                            f"P$:{val_ppal:.2f} | C$:{val_chica:.2f} | "
+                            f"Vuelto — P$:{val_ppal:.2f} | C$:{val_chica:.2f} | "
                             f"PBs:{val_ppal_bs:.2f} | CBs:{val_chica_bs:.2f}"
                         ),
                         creado_en     = datetime.now(),
                     ))
 
-            # ── Commit único: todo o nada ──────────────────────────────────────
             sesion.commit()
-
             self.pagina.close(self.dialogo)
             self.pagina.open(ft.SnackBar(
-                ft.Text("Cobro registrado correctamente"),
-                bgcolor=ft.Colors.GREEN_700,
+                ft.Text(
+                    "Cobro registrado correctamente"
+                    if saldo_pendiente_tx <= 0.01
+                    else f"Cobro parcial — Quedan ${saldo_pendiente_tx:.2f} pendientes"
+                ),
+                bgcolor=(
+                    ft.Colors.GREEN_700 if saldo_pendiente_tx <= 0.01
+                    else ft.Colors.BLUE_700
+                ),
             ))
             if self.al_completar:
                 self.al_completar()
@@ -975,15 +1246,12 @@ class DialogoPago:
         except Exception as error:
             sesion.rollback()
             self.pagina.open(ft.SnackBar(
-                ft.Text(f"Error al registrar el pago: {str(error)}"),
+                ft.Text(f"Error al registrar el pago: {error}"),
                 bgcolor=ft.Colors.RED_700,
             ))
         finally:
             sesion.close()
 
-    # ══════════════════════════════════════════════════════════════════════════
-
     def mostrar(self):
-        """Construye y abre el diálogo de cobro."""
         self.dialogo = self.construir()
         self.pagina.open(self.dialogo)

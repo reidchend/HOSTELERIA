@@ -3,7 +3,8 @@
 import flet as ft
 from datetime import datetime, timedelta
 from database.connection import SesionLocal
-from database.models import Habitacion, EstadoHabitacion, Huesped, Estadia
+from utils.calculos_financieros import leer_config_financiera
+from database.models import LineaCuenta, TipoLinea, Habitacion, EstadoHabitacion, Huesped, Estadia
 from modules.finance.payment_dialog import DialogoPago
 
 
@@ -203,18 +204,47 @@ class DialogoCheckIn:
             self.total_calculado = noches * precio_noche
 
             # 4. Crear la estadía
+            # Si el huésped tiene crédito de estadías anteriores,
+            # se transfiere al depósito de esta estadía y se limpia del huésped.
+            credito_inicial = titular.credito_usd or 0.0
+            if credito_inicial > 0:
+                titular.credito_usd = 0.0
             self.estadia_actual = Estadia(
                 habitacion_id = habitacion_bd.id,
                 entrada       = fecha_entrada,
                 salida        = fecha_salida,
                 activa        = True,
-                deposito_usd  = 0.0,
+                deposito_usd  = credito_inicial,  # crédito previo disponible
             )
             self.estadia_actual.huespedes = lista_huespedes
             sesion.add(self.estadia_actual)
+            sesion.flush()  # obtener el ID de la estadía antes del commit
+
+            # 5. Crear la línea de cuenta inicial (hospedaje)
+            config      = leer_config_financiera(sesion)
+            factor_iva  = config.porcentaje_iva / 100
+            monto_base  = noches * precio_noche
+            from decimal import Decimal, ROUND_HALF_UP
+            _D = lambda x: Decimal(str(x))
+            monto_total = float((_D(monto_base) * (1 + _D(factor_iva))).quantize(
+                Decimal('0.01'), rounding=ROUND_HALF_UP
+            ))
+            sesion.add(LineaCuenta(
+                estadia_id = self.estadia_actual.id,
+                tipo       = TipoLinea.HOSPEDAJE,
+                concepto   = (
+                    f'Hospedaje — Hab. {habitacion_bd.numero} '
+                    f'({noches} noche{"s" if noches > 1 else ""}) '
+                    f'del {fecha_entrada.strftime("%d/%m/%Y")} '
+                    f'al {fecha_salida.strftime("%d/%m/%Y")}'
+                ),
+                monto_usd  = monto_total,
+                cancelada  = False,
+            ))
             sesion.commit()
             sesion.refresh(self.estadia_actual)
 
+            self.total_calculado = monto_total
             self.pagina.close(self.dialogo)
             self.preguntar_por_pago()
 

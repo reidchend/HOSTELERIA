@@ -3,7 +3,7 @@
 import flet as ft
 from sqlalchemy import func
 from database.connection import inicializar_bd, SesionLocal
-from database.models import Habitacion, EstadoHabitacion
+from database.models import Habitacion, EstadoHabitacion, Estadia, Huesped
 from modules.auth.login import PantallaLogin
 from modules.rooms.management import GridHabitaciones
 from modules.rooms.details import DialogoDetallesHabitacion
@@ -94,10 +94,65 @@ def principal(pagina: ft.Page):
             detalles.mostrar()
 
     def iniciar_checkout(habitacion):
-        """Inicia el proceso de check-out (flujo a completar)."""
-        pagina.open(ft.SnackBar(
-            ft.Text(f"Iniciando proceso de salida para Hab {habitacion.numero}...")
-        ))
+        """Check-out: cierra la estadía y transfiere el saldo a favor al huésped."""
+        from sqlalchemy.orm import selectinload
+
+        sesion = SesionLocal()
+        try:
+            estadia = (
+                sesion.query(Estadia)
+                .options(selectinload(Estadia.huespedes))
+                .filter(
+                    Estadia.habitacion_id == habitacion.id,
+                    Estadia.activa == True,
+                )
+                .first()
+            )
+            if not estadia:
+                pagina.open(ft.SnackBar(
+                    ft.Text("No se encontró estadía activa."), bgcolor="red"
+                ))
+                return
+
+            # 1. Transferir saldo a favor al huésped titular
+            if estadia.deposito_usd and estadia.deposito_usd > 0.01:
+                titular = estadia.huespedes[0] if estadia.huespedes else None
+                if titular:
+                    huesped_bd = sesion.get(Huesped, titular.id)
+                    huesped_bd.credito_usd = (
+                        (huesped_bd.credito_usd or 0.0) + estadia.deposito_usd
+                    )
+                    monto_transferido = estadia.deposito_usd
+                    estadia.deposito_usd = 0.0
+                else:
+                    monto_transferido = 0.0
+            else:
+                monto_transferido = 0.0
+
+            # 2. Marcar la estadía como cerrada
+            estadia.activa = False
+
+            # 3. Marcar la habitación como libre
+            from database.models import EstadoHabitacion as EH
+            hab_bd = sesion.get(Habitacion, habitacion.id)
+            hab_bd.estado = EH.FREE
+
+            sesion.commit()
+
+            msg = f"Check-Out Hab. {habitacion.numero} completado."
+            if monto_transferido > 0.01:
+                msg += f" Crédito ${monto_transferido:.2f} transferido al huésped."
+
+            pagina.open(ft.SnackBar(ft.Text(msg), bgcolor="green"))
+            refrescar_vista()
+
+        except Exception as error:
+            sesion.rollback()
+            pagina.open(ft.SnackBar(
+                ft.Text(f"Error en check-out: {error}"), bgcolor="red"
+            ))
+        finally:
+            sesion.close()
 
     # ════════════════════════════════════════════════════════════════════════
     # NAVEGACIÓN Y RENDERIZADO

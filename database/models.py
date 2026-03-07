@@ -34,6 +34,7 @@ class MetodoPago(enum.Enum):
     PAGO_MOVIL   = "Pago Móvil"
     ZELLE        = "Zelle"
     DEBIT_CARD   = "Tarjeta Débito"
+    SALDO_FAVOR  = "Saldo a Favor"          # Crédito acumulado del huésped
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -134,6 +135,8 @@ class Estadia(Base):
     huespedes     = relationship("Huesped", secondary=estadia_huespedes, lazy="selectin")
     pagos         = relationship("Pago", back_populates="estadia", lazy="selectin")
     cargos_extras = relationship("CargoExtra", back_populates="estadia", lazy="selectin")
+    lineas_cuenta = relationship("LineaCuenta",        back_populates="estadia", lazy="selectin")
+    transacciones = relationship("TransaccionCobro",   back_populates="estadia", lazy="selectin")
 
 
 class Pago(Base):
@@ -154,7 +157,7 @@ class Pago(Base):
     es_devolucion = Column(Boolean, default=False)                   # True = salida de caja (vuelto)
     creado_en     = Column(DateTime, default=datetime.now)
 
-    estadia = relationship("Estadia", back_populates="pagos")
+    estadia         = relationship("Estadia", back_populates="pagos")
 
 
 class CargoExtra(Base):
@@ -215,6 +218,56 @@ class Configuracion(Base):
     valor        = Column(String(500))
     descripcion  = Column(String(200))
     actualizado_en = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+
+
+class TipoLinea(enum.Enum):
+    """Origen de una línea de cuenta abierta."""
+    HOSPEDAJE      = "hospedaje"
+    CARGO_EXTRA    = "cargo_extra"
+    SALDO_PENDIENTE = "saldo_pendiente"  # Deuda parcial de una transacción
+
+
+class TransaccionCobro(Base):
+    """
+    Agrupa un evento de cobro: qué líneas se seleccionaron, cuánto se pagó
+    y si quedó saldo pendiente.
+    Permite mostrar el historial de facturas agrupado en details.py.
+    """
+    __tablename__ = "cobro_transactions"
+
+    id             = Column(Integer, primary_key=True)
+    estadia_id     = Column(Integer, ForeignKey("stays.id"), nullable=False)
+    total_seleccionado = Column(Float, nullable=False)         # Lo que se intentó cobrar
+    total_pagado   = Column(Float, nullable=False)             # Lo que realmente ingresó
+    saldo_pendiente = Column(Float, default=0.0)               # Diferencia (0 si completo)
+    creado_en      = Column(DateTime, default=datetime.now)
+
+    estadia = relationship("Estadia", back_populates="transacciones")
+    lineas  = relationship("LineaCuenta", back_populates="transaccion")
+
+
+class LineaCuenta(Base):
+    """
+    Línea de cuenta abierta de una estadía.
+    Cada cargo (hospedaje, servicio extra, renovación) genera una línea.
+
+    cancelada=True      → ya fue cobrada (total o parcialmente).
+    transaccion_id      → agrupa la línea bajo un cobro específico.
+    """
+    __tablename__ = "account_lines"
+
+    id               = Column(Integer, primary_key=True)
+    estadia_id       = Column(Integer, ForeignKey("stays.id"), nullable=False)
+    transaccion_id   = Column(Integer, ForeignKey("cobro_transactions.id"), nullable=True)
+    tipo             = Column(Enum(TipoLinea), nullable=False)
+    concepto         = Column(String(200), nullable=False)
+    monto_usd        = Column(Float, nullable=False)
+    cancelada        = Column(Boolean, default=False)
+    creado_en        = Column(DateTime, default=datetime.now)
+
+    estadia     = relationship("Estadia",           back_populates="lineas_cuenta")
+    transaccion = relationship("TransaccionCobro",  back_populates="lineas")
 
 
 class Turno(Base):
