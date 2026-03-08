@@ -544,50 +544,29 @@ class DialogoPago:
 
     def _abrir_buscador_huesped_externo(self):
         """
-        Diálogo de saldo externo con navegación interna entre vistas.
+        Muestra el buscador de huéspedes DENTRO de self.area_formulario,
+        exactamente como lo hace seleccionar_metodo() con los formularios
+        de pago normales. Así nunca se abre un segundo diálogo y la pila
+        de Flet 0.28.3 permanece intacta con un único AlertDialog activo.
 
-        REGLA FLET 0.28.3: page.close() solo se llama desde un on_click
-        de botón explícito del usuario. Nunca desde código programático,
-        porque la pila de diálogos no distingue por referencia y puede
-        cerrar el diálogo de pagos principal.
-
-        Flujo:
-          Vista 1 → lista de huéspedes con saldo (+ buscador)
-          Vista 2 → confirmar monto del huésped seleccionado
-          Vista 3 → éxito: el pago ya está en la lista, solo cerrar
+        Flujo de pantallas dentro de area_formulario:
+          Pantalla A → campo de búsqueda + lista de huéspedes con saldo
+          Pantalla B → confirmar el monto a aplicar del huésped elegido
+        Al confirmar: descuenta la BD, agrega a pagos_sesion y llama
+        refrescar_interfaz() — todo sin tocar page.open/close.
         """
-        contenedor = ft.Column(spacing=10, tight=True)
-        titulo_txt  = ft.Text("Saldo de otro huésped", weight="bold")
 
-        dlg = ft.AlertDialog(
-            title=ft.Row([
-                ft.Icon(ft.Icons.PERSON_SEARCH, color=ft.Colors.TEAL_700),
-                titulo_txt,
-            ], spacing=8),
-            content=ft.Container(content=contenedor, width=460),
-            actions=[],
-            actions_alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-        )
-
-        def _set_vista(controls, actions, titulo):
-            """Reemplaza contenido y acciones del diálogo sin cerrarlo."""
-            titulo_txt.value     = titulo
-            contenedor.controls  = controls
-            dlg.actions          = actions
-            if dlg.page:
-                dlg.update()
-
-        # ══════════════════════════════════════════════════════════════════════
-        # VISTA 1 — lista de huéspedes
-        # ══════════════════════════════════════════════════════════════════════
-        lista_col      = ft.Column(spacing=5, scroll=ft.ScrollMode.AUTO)
+        # ── Widgets de la Pantalla A ──────────────────────────────────────────
+        lista_col      = ft.Column(spacing=4, scroll=ft.ScrollMode.AUTO, height=200)
         campo_busqueda = ft.TextField(
-            label="Filtrar por documento o nombre",
+            label="Documento o nombre",
             prefix_icon=ft.Icons.SEARCH,
             expand=True,
+            autofocus=True,
         )
 
         def _cargar(termino=""):
+            """Consulta huéspedes con crédito y puebla lista_col."""
             sesion = SesionLocal()
             try:
                 q = sesion.query(Huesped).filter(Huesped.credito_usd > 0)
@@ -597,210 +576,226 @@ class DialogoPago:
                         (Huesped.nombre.ilike(f"%{termino}%"))    |
                         (Huesped.apellido.ilike(f"%{termino}%"))
                     )
-                huespedes = q.order_by(Huesped.credito_usd.desc()).limit(30).all()
+                huespedes = q.order_by(Huesped.credito_usd.desc()).limit(20).all()
                 lista_col.controls = (
-                    [_fila_huesped(h, h.credito_usd) for h in huespedes]
-                    if huespedes
-                    else [ft.Text("Sin huéspedes con saldo a favor.",
-                                  size=12, color=ft.Colors.GREY_400, italic=True)]
+                    [_fila(h) for h in huespedes]
+                    if huespedes else
+                    [ft.Text("Sin huéspedes con saldo a favor.",
+                             size=11, color=ft.Colors.GREY_400, italic=True)]
                 )
             finally:
                 sesion.close()
-            if lista_col.page:
-                lista_col.update()
+            # area_formulario ya está montado en el árbol del diálogo activo
+            self.area_formulario.update()
 
-        def _fila_huesped(h, credito):
+        def _fila(h):
+            """Una fila de la lista: nombre, doc, saldo y botón Usar."""
             hid    = h.id
             doc    = h.documento
             nombre = h.nombre_completo
-            def _ir_vista2(_):
-                mostrar_vista2(hid, doc, nombre, credito)
+            saldo  = round(h.credito_usd or 0.0, 2)
             return ft.Container(
                 content=ft.Row([
                     ft.Column([
-                        ft.Text(nombre, size=12, weight="bold"),
+                        ft.Text(nombre, size=11, weight="bold"),
                         ft.Text(f"Doc: {doc}", size=10, color=ft.Colors.GREY_600),
                     ], spacing=1, expand=True),
                     ft.Container(
-                        content=ft.Text(f"${credito:.2f}", size=13,
+                        content=ft.Text(f"${saldo:.2f}", size=12,
                                         weight="bold", color=ft.Colors.WHITE),
                         bgcolor=ft.Colors.GREEN_700,
-                        padding=ft.padding.symmetric(horizontal=10, vertical=4),
-                        border_radius=8,
+                        padding=ft.padding.symmetric(horizontal=8, vertical=3),
+                        border_radius=6,
                     ),
                     ft.ElevatedButton(
                         "Usar",
+                        height=30,
                         style=ft.ButtonStyle(
                             color=ft.Colors.TEAL_700,
                             bgcolor=ft.Colors.with_opacity(0.08, ft.Colors.TEAL_700),
                             side=ft.BorderSide(1, ft.Colors.TEAL_300),
                             shape=ft.RoundedRectangleBorder(radius=6),
                         ),
-                        height=32,
-                        on_click=_ir_vista2,
+                        on_click=lambda _, i=hid, d=doc, n=nombre, s=saldo:
+                            _mostrar_pantalla_b(i, d, n, s),
                     ),
-                ], spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
-                padding=ft.padding.symmetric(horizontal=10, vertical=7),
-                bgcolor=ft.Colors.WHITE, border_radius=8,
+                ], spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                padding=ft.padding.symmetric(horizontal=8, vertical=5),
+                bgcolor=ft.Colors.WHITE, border_radius=7,
                 border=ft.border.all(1, ft.Colors.GREY_100),
             )
 
-        def mostrar_vista1():
-            campo_busqueda.on_change = lambda ev: _cargar(campo_busqueda.value.strip())
-            _set_vista(
-                controls=[
-                    campo_busqueda,
-                    ft.Container(
-                        content=lista_col, height=260,
-                        border=ft.border.all(1, ft.Colors.GREY_200),
-                        border_radius=8, padding=8,
-                    ),
-                ],
-                actions=[
-                    ft.TextButton(
-                        "Cancelar",
-                        on_click=lambda _: self.pagina.close(dlg),
-                    ),
-                ],
-                titulo="Saldo de otro huésped",
-            )
+        def _mostrar_pantalla_a():
+            """Renderiza la pantalla de búsqueda en area_formulario."""
+            campo_busqueda.on_change = lambda _: _cargar(campo_busqueda.value.strip())
+            self.area_formulario.controls = [
+                ft.Container(
+                    content=ft.Column([
+                        ft.Row([
+                            ft.Icon(ft.Icons.PERSON_SEARCH,
+                                    color=ft.Colors.TEAL_700, size=16),
+                            ft.Text("Saldo de otro huésped", size=13,
+                                    weight="bold", color=ft.Colors.TEAL_700),
+                        ], spacing=6),
+                        campo_busqueda,
+                        ft.Container(
+                            content=lista_col,
+                            border=ft.border.all(1, ft.Colors.GREY_200),
+                            border_radius=8, padding=6,
+                        ),
+                        # Botón cancelar: vuelve al estado vacío del área
+                        ft.TextButton(
+                            "✕  Cancelar búsqueda",
+                            style=ft.ButtonStyle(color=ft.Colors.GREY_500),
+                            on_click=lambda _: _cancelar(),
+                        ),
+                    ], spacing=8),
+                    bgcolor=ft.Colors.TEAL_50, padding=12, border_radius=10,
+                    border=ft.border.all(1, ft.Colors.TEAL_100),
+                )
+            ]
+            self.area_formulario.update()
+            _cargar()   # carga inicial sin filtro
 
-        # ══════════════════════════════════════════════════════════════════════
-        # VISTA 2 — confirmar monto
-        # ══════════════════════════════════════════════════════════════════════
-        def mostrar_vista2(hid, doc, nombre, credito):
+        # ── Pantalla B — confirmar monto ──────────────────────────────────────
+        def _mostrar_pantalla_b(hid, doc, nombre, credito):
             pendiente   = self._pendiente()
             monto_sug   = round(min(credito, max(pendiente, 0.0)), 2)
+
             campo_monto = ft.TextField(
                 label="Monto a aplicar",
                 value=f"{monto_sug:.2f}",
                 suffix_text="USD",
                 keyboard_type=ft.KeyboardType.NUMBER,
                 text_align=ft.TextAlign.RIGHT,
-                width=200,
+                width=180,
+                autofocus=True,
             )
-            error_txt = ft.Text("", color=ft.Colors.RED_700, size=11)
+            txt_error = ft.Text("", color=ft.Colors.RED_700, size=11)
 
             def _aplicar(_):
-                # Parsear el valor limpiando cualquier símbolo residual
+                # 1. Validar
                 try:
-                    limpio = (campo_monto.value or "").replace("$","").replace(",",".").strip()
-                    monto  = round(float(limpio), 2)
+                    monto = round(
+                        float((campo_monto.value or "")
+                              .replace("$", "").replace(",", ".").strip()), 2
+                    )
                 except (ValueError, AttributeError):
-                    error_txt.value = "Número inválido"
-                    error_txt.update()
+                    txt_error.value = "Número inválido"
+                    txt_error.update()
                     return
-
                 if monto <= 0:
-                    error_txt.value = "El monto debe ser mayor a 0"
-                    error_txt.update()
+                    txt_error.value = "El monto debe ser mayor a 0"
+                    txt_error.update()
                     return
                 if monto > credito + 0.01:
-                    error_txt.value = f"Máximo disponible: ${credito:.2f}"
-                    error_txt.update()
+                    txt_error.value = f"Máximo disponible: ${credito:.2f}"
+                    txt_error.update()
                     return
 
+                # 2. Descontar crédito en la BD de forma inmediata y atómica.
+                #    Se hace aquí — no en finalizar_cobro — para que el
+                #    crédito quede reservado aunque el usuario cierre el modal
+                #    de pagos sin finalizar. finalizar_cobro respeta la bandera
+                #    ya_descontado_en_bd y no vuelve a tocarlo.
+                sesion = SesionLocal()
+                try:
+                    h_ext = sesion.get(Huesped, hid)
+                    if not h_ext:
+                        txt_error.value = "Huésped no encontrado"
+                        txt_error.update()
+                        return
+                    credito_real = h_ext.credito_usd or 0.0
+                    if monto > credito_real + 0.01:
+                        txt_error.value = f"Saldo actual: ${credito_real:.2f}"
+                        txt_error.update()
+                        return
+                    h_ext.credito_usd = max(0.0, credito_real - monto)
+                    sesion.commit()
+                except Exception as exc:
+                    sesion.rollback()
+                    txt_error.value = f"Error BD: {exc}"
+                    txt_error.update()
+                    return
+                finally:
+                    sesion.close()
+
+                # 3. Agregar a pagos_sesion con bandera ya_descontado_en_bd
                 tasa = self.config.tasa_cambio
                 self.pagos_sesion.append({
                     "metodo":                 MetodoPago.SALDO_FAVOR,
                     "monto_usd":              monto,
                     "monto_bs":               a_bs(monto, tasa),
                     "referencia":             "",
-                    "etiqueta":               f"Saldo de {nombre} (${monto:.2f})",
+                    "etiqueta":               f"Saldo de {nombre}",
                     "color":                  ft.Colors.TEAL_700,
                     "icono":                  ft.Icons.PERSON_PIN,
                     "visualizacion":          f"${monto:.2f}",
                     "es_saldo_favor":         True,
+                    "ya_descontado_en_bd":    True,
                     "huesped_externo_id":     hid,
                     "huesped_externo_nombre": nombre,
                     "huesped_externo_doc":    doc,
+                    "descripcion_extra": (
+                        f"Saldo de {nombre} (doc: {doc}) "
+                        f"aplicado a estadía #{self.id_estadia}"
+                    ),
                 })
 
-                # Actualizar el panel de pagos ANTES de tocar este diálogo
+                # 4. Limpiar area_formulario y refrescar el panel de pagos.
+                #    Al no haber segundo diálogo, refrescar_interfaz() opera
+                #    directamente sobre el único diálogo abierto — funciona.
+                _cancelar()
                 self.refrescar_interfaz()
 
-                # Mostrar vista de éxito — el usuario cierra manualmente.
-                # NO se llama page.close() aquí para no cerrar el modal de pagos.
-                mostrar_vista3(nombre, monto)
+            self.area_formulario.controls = [
+                ft.Container(
+                    content=ft.Column([
+                        ft.Row([
+                            ft.Icon(ft.Icons.PERSON, color=ft.Colors.TEAL_700, size=15),
+                            ft.Text(nombre, size=12, weight="bold"),
+                        ], spacing=6),
+                        ft.Text(f"Doc: {doc} · Crédito: ${credito:.2f}",
+                                size=11, color=ft.Colors.GREY_600),
+                        ft.Divider(height=4),
+                        ft.Row([campo_monto], spacing=8),
+                        txt_error,
+                        ft.Row([
+                            ft.TextButton(
+                                "← Volver",
+                                style=ft.ButtonStyle(color=ft.Colors.GREY_600),
+                                on_click=lambda _: _mostrar_pantalla_a(),
+                            ),
+                            ft.ElevatedButton(
+                                "Aplicar saldo",
+                                icon=ft.Icons.CHECK,
+                                bgcolor=ft.Colors.TEAL_700,
+                                color=ft.Colors.WHITE,
+                                on_click=_aplicar,
+                            ),
+                        ], spacing=10),
+                    ], spacing=8),
+                    bgcolor=ft.Colors.TEAL_50, padding=12, border_radius=10,
+                    border=ft.border.all(1, ft.Colors.TEAL_100),
+                )
+            ]
+            self.area_formulario.update()
 
-            _set_vista(
-                controls=[
-                    ft.Container(
-                        content=ft.Column([
-                            ft.Row([
-                                ft.Icon(ft.Icons.PERSON, color=ft.Colors.TEAL_700, size=16),
-                                ft.Text(nombre, size=13, weight="bold"),
-                            ], spacing=6),
-                            ft.Text(f"Documento: {doc}", size=11, color=ft.Colors.GREY_600),
-                            ft.Text(f"Crédito disponible: ${credito:.2f}",
-                                    size=12, color=ft.Colors.GREEN_700, weight="bold"),
-                            ft.Divider(height=6),
-                            campo_monto,
-                            error_txt,
-                        ], spacing=8),
-                        bgcolor=ft.Colors.TEAL_50, padding=14, border_radius=10,
-                        border=ft.border.all(1, ft.Colors.TEAL_100),
+        def _cancelar():
+            """Devuelve area_formulario al estado de bienvenida."""
+            self.area_formulario.controls = [
+                ft.Container(
+                    content=ft.Text(
+                        "← Selecciona un método para ingresar el pago",
+                        size=12, color=ft.Colors.GREY_500, italic=True,
                     ),
-                ],
-                actions=[
-                    ft.TextButton("← Volver", on_click=lambda _: (mostrar_vista1(), _cargar())),
-                    ft.ElevatedButton(
-                        "Aplicar saldo",
-                        icon=ft.Icons.CHECK,
-                        bgcolor=ft.Colors.TEAL_700,
-                        color=ft.Colors.WHITE,
-                        on_click=_aplicar,
-                    ),
-                ],
-                titulo=f"Confirmar — {nombre}",
-            )
+                    padding=ft.padding.symmetric(vertical=12),
+                )
+            ]
+            self.area_formulario.update()
 
-        # ══════════════════════════════════════════════════════════════════════
-        # VISTA 3 — éxito: pago ya registrado en la lista
-        # ══════════════════════════════════════════════════════════════════════
-        def mostrar_vista3(nombre, monto):
-            pendiente_restante = self._pendiente()
-            if pendiente_restante > 0.01:
-                msg = f"Quedan ${pendiente_restante:.2f} por cobrar. Puedes agregar otro metodo de pago."
-                color_msg = ft.Colors.BLUE_700
-            else:
-                msg   = "La cuenta ha quedado saldada."
-                color_msg = ft.Colors.GREEN_700
-
-            _set_vista(
-                controls=[
-                    ft.Container(
-                        content=ft.Column([
-                            ft.Row([
-                                ft.Icon(ft.Icons.CHECK_CIRCLE, color=ft.Colors.GREEN_700, size=28),
-                                ft.Text("Saldo aplicado", size=16, weight="bold",
-                                        color=ft.Colors.GREEN_700),
-                            ], spacing=10),
-                            ft.Text(f"Se aplicaron ${monto:.2f} del crédito de {nombre}.",
-                                    size=12),
-                            ft.Text(msg, size=12, color=color_msg),
-                        ], spacing=10, horizontal_alignment=ft.CrossAxisAlignment.CENTER),
-                        bgcolor=ft.Colors.GREEN_50, padding=20, border_radius=10,
-                        border=ft.border.all(1, ft.Colors.GREEN_200),
-                        alignment=ft.alignment.center,
-                    ),
-                ],
-                actions=[
-                    ft.ElevatedButton(
-                        "Cerrar y continuar",
-                        icon=ft.Icons.ARROW_BACK,
-                        bgcolor=ft.Colors.BLUE_700,
-                        color=ft.Colors.WHITE,
-                        on_click=lambda _: self.pagina.close(dlg),
-                    ),
-                ],
-                titulo="Saldo aplicado correctamente",
-            )
-
-        # Carga inicial y abrir
-        _cargar()
-        mostrar_vista1()
-        self.pagina.open(dlg)
+        # Iniciar directamente en la pantalla A
+        _mostrar_pantalla_a()
 
 
     def mostrar_seccion_sobrante(self, sobrante_usd):
@@ -920,7 +915,11 @@ class DialogoPago:
                     doc_ext        = pago.get("huesped_externo_doc", "—")
                     nombre_ext     = pago.get("huesped_externo_nombre", "")
 
-                    if huesped_ext_id:
+                    # Si ya_descontado_en_bd=True el crédito fue descontado
+                    # en el momento de confirmar en el buscador — no tocar de nuevo.
+                    if pago.get("ya_descontado_en_bd"):
+                        pass   # solo registrar el Pago, nada más
+                    elif huesped_ext_id:
                         # Descuenta del crédito del huésped EXTERNO
                         h_ext = sesion.get(Huesped, huesped_ext_id)
                         if h_ext:

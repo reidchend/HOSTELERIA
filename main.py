@@ -1,4 +1,9 @@
-# main.py
+# main.py  ── arquitectura de contenedor persistente
+#
+# La página se construye UNA SOLA VEZ tras el login.
+# Los cambios de vista solo intercambian el contenido de _zona_contenido,
+# dejando intactos la barra superior y las tarjetas de resumen.
+# Esto elimina el parpadeo y la reconstrucción brusca de la interfaz.
 
 import flet as ft
 from sqlalchemy import func
@@ -15,6 +20,12 @@ def principal(pagina: ft.Page):
     """
     Función principal de la aplicación.
     Configura la página, inicializa la BD y lanza la pantalla de login.
+
+    ARQUITECTURA DE LAYOUT PERSISTENTE:
+    La interfaz se construye una sola vez (_construir_interfaz_app) y
+    nunca vuelve a hacerse pagina.clean() mientras el usuario esté logueado.
+    Los cambios de vista operan sobre _zona_contenido exclusivamente,
+    dejando inmóviles la barra superior y las tarjetas de resumen.
     """
     # ── Configuración de la ventana ─────────────────────────────────────────
     pagina.title        = "Hotel Management System"
@@ -39,24 +50,50 @@ def principal(pagina: ft.Page):
         sesion_inicio.close()
 
     # ── Estado global de la aplicación ─────────────────────────────────────
-    # Diccionario mutable compartido entre todos los módulos.
     estado_app = {
         "usuario_activo": None,
         "tasa_cambio":    float(config_inicial.get("exchange_rate", 35.5)),
         "nombre_hotel":   config_inicial.get("hotel_name", "Mi Hotel"),
         "habitacion_sel": None,
-        "vista_activa":   "dashboard",  # 'dashboard' o 'configuracion'
+        "vista_activa":   "dashboard",
     }
+
+    # ════════════════════════════════════════════════════════════════════════
+    # REFERENCIAS A WIDGETS PERSISTENTES
+    #
+    # Estos objetos se crean una vez y viven durante toda la sesión.
+    # Al cambiar de vista, solo se modifica .content de _zona_contenido
+    # y se llama a .update() — el resto del árbol de widgets no se toca.
+    # ════════════════════════════════════════════════════════════════════════
+
+    # Zona intercambiable: única parte del layout que cambia entre vistas
+    _zona_contenido = ft.Container(expand=True)
+
+    # Row de tarjetas de resumen — se actualiza reemplazando sus .controls
+    _fila_tarjetas = ft.Row(
+        alignment=ft.MainAxisAlignment.CENTER,
+        spacing=15,
+    )
+    _contenedor_tarjetas = ft.Container(
+        content=_fila_tarjetas,
+        padding=20,
+    )
+
+    # Botón de navegación con referencia directa para cambiar texto/ícono in-place
+    _btn_nav = ft.ElevatedButton(
+        style=ft.ButtonStyle(
+            color=ft.Colors.BLUE_700,
+            bgcolor=ft.Colors.BLUE_50,
+            shape=ft.RoundedRectangleBorder(radius=8),
+        ),
+    )
 
     # ════════════════════════════════════════════════════════════════════════
     # LÓGICA DE NEGOCIO
     # ════════════════════════════════════════════════════════════════════════
 
     def obtener_estadisticas_habitaciones() -> dict:
-        """
-        Devuelve el conteo de habitaciones por estado en una sola consulta agrupada.
-        Eficiente porque usa GROUP BY en lugar de consultas individuales.
-        """
+        """Conteo de habitaciones por estado en una única consulta GROUP BY."""
         sesion = SesionLocal()
         try:
             resultados = (
@@ -66,12 +103,12 @@ def principal(pagina: ft.Page):
             )
             conteos = {estado: cantidad for estado, cantidad in resultados}
             return {
-                "total":        sum(conteos.values()),
-                "libres":       conteos.get(EstadoHabitacion.FREE,        0),
-                "ocupadas":     conteos.get(EstadoHabitacion.OCCUPIED,    0),
-                "reservadas":   conteos.get(EstadoHabitacion.RESERVED,    0),
-                "limpieza":     conteos.get(EstadoHabitacion.CLEANING,    0),
-                "mantenimiento":conteos.get(EstadoHabitacion.MAINTENANCE, 0),
+                "total":         sum(conteos.values()),
+                "libres":        conteos.get(EstadoHabitacion.FREE,        0),
+                "ocupadas":      conteos.get(EstadoHabitacion.OCCUPIED,    0),
+                "reservadas":    conteos.get(EstadoHabitacion.RESERVED,    0),
+                "limpieza":      conteos.get(EstadoHabitacion.CLEANING,    0),
+                "mantenimiento": conteos.get(EstadoHabitacion.MAINTENANCE, 0),
             }
         except Exception as error:
             print(f"Error al obtener estadísticas: {error}")
@@ -83,85 +120,114 @@ def principal(pagina: ft.Page):
         """Decide qué módulo abrir según el estado de la habitación clicada."""
         if habitacion.estado == EstadoHabitacion.FREE:
             from modules.rooms.checkin import DialogoCheckIn
-            dialogo_checkin = DialogoCheckIn(pagina, habitacion, al_completar=refrescar_vista)
-            dialogo_checkin.mostrar()
+            DialogoCheckIn(pagina, habitacion, al_completar=refrescar_grid_y_tarjetas).mostrar()
 
         elif habitacion.estado == EstadoHabitacion.OCCUPIED:
-            detalles = DialogoDetallesHabitacion(
+            # Se pasa al_actualizar_grid para que el diálogo de detalles pueda
+            # notificar al dashboard cuando cambia algo (renovación, cargo extra,
+            # cobro), actualizando las tarjetas y el grid sin reconstruir nada más.
+            DialogoDetallesHabitacion(
                 pagina, habitacion,
                 al_solicitar_checkout=iniciar_checkout,
-            )
-            detalles.mostrar()
+                al_actualizar_grid=refrescar_grid_y_tarjetas,
+            ).mostrar()
 
     def iniciar_checkout(habitacion):
-        """Check-out: cierra la estadía y transfiere el saldo a favor al huésped."""
-        from sqlalchemy.orm import selectinload
-
-        sesion = SesionLocal()
-        try:
-            estadia = (
-                sesion.query(Estadia)
-                .options(selectinload(Estadia.huespedes))
-                .filter(
-                    Estadia.habitacion_id == habitacion.id,
-                    Estadia.activa == True,
-                )
-                .first()
-            )
-            if not estadia:
-                pagina.open(ft.SnackBar(
-                    ft.Text("No se encontró estadía activa."), bgcolor="red"
-                ))
-                return
-
-            # El saldo a favor vive en Huesped.credito_usd directamente.
-            # No hay nada que transferir desde deposito_usd en el checkout.
-            monto_transferido = 0.0
-
-            # 2. Marcar la estadía como cerrada
-            estadia.activa = False
-
-            # 3. Marcar la habitación como libre
-            from database.models import EstadoHabitacion as EH
-            hab_bd = sesion.get(Habitacion, habitacion.id)
-            hab_bd.estado = EH.FREE
-
-            sesion.commit()
-
-            msg = f"Check-Out Hab. {habitacion.numero} completado."
-            if monto_transferido > 0.01:
-                msg += f" Crédito ${monto_transferido:.2f} transferido al huésped."
-
-            pagina.open(ft.SnackBar(ft.Text(msg), bgcolor="green"))
-            refrescar_vista()
-
-        except Exception as error:
-            sesion.rollback()
-            pagina.open(ft.SnackBar(
-                ft.Text(f"Error en check-out: {error}"), bgcolor="red"
-            ))
-        finally:
-            sesion.close()
+        """Lanza el wizard de Check-Out con validación financiera completa."""
+        from modules.rooms.checkout import CheckOutWizard
+        CheckOutWizard(
+            pagina, habitacion,
+            al_completar=lambda _: refrescar_grid_y_tarjetas(),
+        ).mostrar()
 
     # ════════════════════════════════════════════════════════════════════════
-    # NAVEGACIÓN Y RENDERIZADO
+    # ACTUALIZACIÓN QUIRÚRGICA DE LA INTERFAZ
+    #
+    # Ninguna de estas funciones llama a pagina.clean() ni pagina.add().
+    # Cada una opera sobre el subárbol mínimo necesario.
     # ════════════════════════════════════════════════════════════════════════
 
-    def refrescar_vista():
-        """Recarga el contenido de la vista activa."""
-        renderizar_contenido_app()
+    def _construir_tarjeta(etiqueta, valor, color, subtexto):
+        return ft.Card(content=ft.Container(
+            content=ft.Column([
+                ft.Text(etiqueta, size=12, color=ft.Colors.GREY_700),
+                ft.Text(str(valor), size=28, weight=ft.FontWeight.BOLD, color=color),
+                ft.Text(subtexto, size=10, color=ft.Colors.GREY_600),
+            ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=2),
+            padding=10, width=140,
+        ))
+
+    def actualizar_tarjetas_resumen():
+        """
+        Refresca únicamente los números dentro del Row de tarjetas.
+        Costo visual: cero parpadeo porque solo se reemplazan los hijos del Row.
+        """
+        stats = obtener_estadisticas_habitaciones()
+        _fila_tarjetas.controls = [
+            _construir_tarjeta("Total",         stats["total"],         ft.Colors.BLACK,  "habitaciones"),
+            _construir_tarjeta("Libres",        stats["libres"],        ft.Colors.GREEN,  "disponibles"),
+            _construir_tarjeta("Ocupadas",      stats["ocupadas"],      ft.Colors.RED,    "con huéspedes"),
+            _construir_tarjeta("Limpieza",      stats["limpieza"],      ft.Colors.BLUE,   "en aseo"),
+            _construir_tarjeta("Mantenimiento", stats["mantenimiento"], ft.Colors.PURPLE, "fuera de servicio"),
+        ]
+        _fila_tarjetas.update()
+
+    def _mostrar_dashboard():
+        """Inyecta el grid de habitaciones en la zona intercambiable."""
+        cuadricula = GridHabitaciones(estado_app, al_hacer_clic_habitacion)
+        _zona_contenido.content = ft.Container(
+            content=cuadricula.construir(),
+            expand=True,
+            padding=ft.padding.symmetric(horizontal=30, vertical=10),
+        )
+        _zona_contenido.update()
+
+    def _mostrar_configuracion():
+        """Inyecta la pantalla de gestión de caja en la zona intercambiable."""
+        from modules.finance.cash_management import PantallaGestionCaja
+        _zona_contenido.content = PantallaGestionCaja(pagina, estado_app)
+        _zona_contenido.update()
+
+    def refrescar_grid_y_tarjetas():
+        """
+        Punto de entrada para cualquier operación que modifique el estado de
+        las habitaciones. Actualiza tarjetas y grid sin tocar la barra superior.
+        Es el reemplazo directo de la antigua refrescar_vista().
+        """
+        actualizar_tarjetas_resumen()
+        if estado_app["vista_activa"] == "dashboard":
+            _mostrar_dashboard()
 
     def cambiar_vista(nombre_vista: str):
-        """Alterna entre el dashboard y la vista de configuración."""
+        """
+        Alterna entre dashboard y configuración.
+        Solo modifica el botón de navegación y el contenido de _zona_contenido.
+        La barra superior permanece completamente estática.
+        """
         estado_app["vista_activa"] = nombre_vista
-        renderizar_contenido_app()
+
+        # Actualizar texto e ícono del botón sin reconstruir la barra
+        if nombre_vista == "configuracion":
+            _btn_nav.text = "Dashboard"
+            _btn_nav.icon = ft.Icons.DASHBOARD
+        else:
+            _btn_nav.text = "Configuración"
+            _btn_nav.icon = ft.Icons.SETTINGS
+        _btn_nav.update()
+
+        # Intercambiar el contenido de forma limpia
+        if nombre_vista == "dashboard":
+            actualizar_tarjetas_resumen()   # datos frescos al volver
+            _mostrar_dashboard()
+        else:
+            _mostrar_configuracion()
 
     def al_abrir_turno(tasa_final: float):
         """Callback tras la apertura exitosa del turno de caja."""
         estado_app["tasa_cambio"]  = tasa_final
         estado_app["vista_activa"] = "dashboard"
-        renderizar_contenido_app()
-        print("Sesión iniciada y Dashboard cargado")
+        # Primera y única construcción completa del layout de la app
+        _construir_interfaz_app()
 
     def cerrar_sesion():
         """Limpia el estado y regresa a la pantalla de login."""
@@ -169,66 +235,37 @@ def principal(pagina: ft.Page):
         mostrar_login()
 
     # ════════════════════════════════════════════════════════════════════════
-    # COMPONENTES DE INTERFAZ
+    # CONSTRUCCIÓN ÚNICA DEL LAYOUT DE LA APP
+    # Se ejecuta UNA SOLA VEZ después del login. A partir de aquí todas
+    # las actualizaciones son quirúrgicas sobre los contenedores referenciados.
     # ════════════════════════════════════════════════════════════════════════
 
-    def crear_tarjetas_resumen():
-        """Crea las tarjetas informativas superiores con los conteos de habitaciones."""
-        estadisticas = obtener_estadisticas_habitaciones()
+    def _construir_barra_superior() -> ft.Container:
+        """
+        Construye la barra superior con referencia al _btn_nav persistente.
+        El botón se puede actualizar desde cambiar_vista() sin reconstruir
+        esta barra nunca más.
+        """
+        info_usuario   = estado_app["usuario_activo"]
+        nombre_usuario = info_usuario["nombre_completo"] if info_usuario else "Usuario"
 
-        def construir_tarjeta(etiqueta, valor, color, subtexto):
-            return ft.Card(content=ft.Container(
-                content=ft.Column([
-                    ft.Text(etiqueta, size=12, color=ft.Colors.GREY_700),
-                    ft.Text(str(valor), size=28, weight=ft.FontWeight.BOLD, color=color),
-                    ft.Text(subtexto, size=10, color=ft.Colors.GREY_600),
-                ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=2),
-                padding=10, width=140,
-            ))
-
-        return ft.Container(
-            content=ft.Row([
-                construir_tarjeta("Total",         estadisticas["total"],        ft.Colors.BLACK,  "habitaciones"),
-                construir_tarjeta("Libres",        estadisticas["libres"],       ft.Colors.GREEN,  "disponibles"),
-                construir_tarjeta("Ocupadas",      estadisticas["ocupadas"],     ft.Colors.RED,    "con huéspedes"),
-                construir_tarjeta("Limpieza",      estadisticas["limpieza"],     ft.Colors.BLUE,   "en aseo"),
-                construir_tarjeta("Mantenimiento", estadisticas["mantenimiento"],ft.Colors.PURPLE, "fuera de servicio"),
-            ], alignment=ft.MainAxisAlignment.CENTER, spacing=15),
-            padding=20,
+        # Configurar estado inicial del botón de navegación
+        _btn_nav.text     = "Configuración"
+        _btn_nav.icon     = ft.Icons.SETTINGS
+        _btn_nav.on_click = lambda _: cambiar_vista(
+            "configuracion" if estado_app["vista_activa"] == "dashboard" else "dashboard"
         )
 
-    def crear_barra_superior():
-        """Crea la barra de navegación superior con el nombre del hotel, tasa y usuario."""
-        info_usuario  = estado_app["usuario_activo"]
-        nombre_usuario = info_usuario["nombre_completo"] if info_usuario else "Usuario"
-        vista_actual   = estado_app["vista_activa"]
-
         return ft.Container(
             content=ft.Row([
-                # Logo y nombre del hotel
                 ft.Row([
                     ft.Icon(ft.Icons.HOTEL, size=32, color=ft.Colors.BLUE_700),
                     ft.Text(estado_app["nombre_hotel"], size=22, weight="bold",
                             color=ft.Colors.BLUE_900),
                 ]),
-                # Acciones y perfil
                 ft.Row([
-                    ft.ElevatedButton(
-                        text="Dashboard" if vista_actual == "configuracion" else "Configuración",
-                        icon=(
-                            ft.Icons.DASHBOARD if vista_actual == "configuracion"
-                            else ft.Icons.SETTINGS
-                        ),
-                        on_click=lambda _: cambiar_vista(
-                            "dashboard" if vista_actual == "configuracion" else "configuracion"
-                        ),
-                        style=ft.ButtonStyle(
-                            color=ft.Colors.BLUE_700, bgcolor=ft.Colors.BLUE_50,
-                            shape=ft.RoundedRectangleBorder(radius=8),
-                        ),
-                    ),
+                    _btn_nav,
                     ft.VerticalDivider(width=20),
-                    # Indicador de la tasa de cambio vigente
                     ft.Container(
                         content=ft.Row([
                             ft.Icon(ft.Icons.ATTACH_MONEY, size=18, color=ft.Colors.GREEN_700),
@@ -238,10 +275,10 @@ def principal(pagina: ft.Page):
                             ),
                         ]),
                         padding=ft.padding.all(8),
-                        bgcolor=ft.Colors.GREEN_50, border_radius=8,
+                        bgcolor=ft.Colors.GREEN_50,
+                        border_radius=8,
                     ),
                     ft.VerticalDivider(width=20),
-                    # Perfil del usuario activo
                     ft.Row([
                         ft.Column([
                             ft.Text(nombre_usuario, size=14, weight="bold"),
@@ -268,30 +305,37 @@ def principal(pagina: ft.Page):
             border=ft.border.only(bottom=ft.border.BorderSide(1, ft.Colors.BLACK12)),
         )
 
-    def renderizar_contenido_app():
-        """Función central que dibuja la interfaz principal o la vista de configuración."""
+    def _construir_interfaz_app():
+        """
+        Único punto en toda la app que llama a pagina.clean() y pagina.add()
+        durante la sesión activa. Tras ejecutarse, el layout no se destruye más.
+        """
         pagina.clean()
-        encabezado = crear_barra_superior()
 
-        if estado_app["vista_activa"] == "dashboard":
-            cuadricula = GridHabitaciones(estado_app, al_hacer_clic_habitacion)
-            contenido  = ft.Column([
-                crear_tarjetas_resumen(),
-                ft.Container(
-                    content=cuadricula.construir(),
-                    expand=True,
-                    padding=ft.padding.symmetric(horizontal=30, vertical=10),
-                ),
-            ], expand=True, spacing=0)
-        else:
-            from modules.finance.cash_management import PantallaGestionCaja
-            contenido = PantallaGestionCaja(pagina, estado_app)
+        # Preparar el contenido inicial del dashboard
+        cuadricula = GridHabitaciones(estado_app, al_hacer_clic_habitacion)
+        _zona_contenido.content = ft.Container(
+            content=cuadricula.construir(),
+            expand=True,
+            padding=ft.padding.symmetric(horizontal=30, vertical=10),
+        )
 
+        # CRÍTICO: pagina.add() debe ir ANTES de cualquier .update() sobre
+        # widgets hijos — Flet requiere que el control esté registrado en
+        # el árbol de la página antes de poder actualizarlo individualmente.
         pagina.add(ft.Column([
-            encabezado,
-            ft.Container(content=contenido, expand=True),
+            _construir_barra_superior(),
+            _contenedor_tarjetas,
+            ft.Container(content=_zona_contenido, expand=True),
         ], expand=True, spacing=0))
+
+        # Ahora que los widgets ya están en el árbol, poblar las tarjetas.
+        actualizar_tarjetas_resumen()
         pagina.update()
+
+    # ════════════════════════════════════════════════════════════════════════
+    # PANTALLA DE LOGIN
+    # ════════════════════════════════════════════════════════════════════════
 
     def mostrar_login():
         """Limpia la pantalla y muestra el formulario de inicio de sesión."""
@@ -307,18 +351,15 @@ def principal(pagina: ft.Page):
 
     def al_iniciar_sesion_exitoso(usuario: dict):
         """
-        Callback del login: guarda el usuario y lanza la apertura de turno.
-        El usuario es un dict (no un objeto ORM) para evitar problemas de sesión detached.
+        Callback del login. Guarda el usuario y abre el diálogo de apertura
+        de turno. El usuario llega como dict para evitar sesiones ORM detached.
         """
         estado_app["usuario_activo"] = usuario
-        dialogo_apertura = DialogoAperturaTurno(
-            pagina, usuario, al_completar=al_abrir_turno,
-        )
-        dialogo_apertura.mostrar()
+        DialogoAperturaTurno(pagina, usuario, al_completar=al_abrir_turno).mostrar()
 
     # ── Punto de entrada de la aplicación ──────────────────────────────────
     mostrar_login()
 
 
 if __name__ == "__main__":
-    ft.app(target=principal)
+    ft.app(target=principal, host="localhost", port=8550, view=ft.WEB_BROWSER)

@@ -29,10 +29,21 @@ class DialogoAperturaTurno:
             self.tasa_actual = float(config_tasa.valor) if config_tasa else 0.0
             saldo_chica_usd  = caja.caja_chica_usd if caja else 0.0
             saldo_chica_bs   = caja.caja_chica_bs  if caja else 0.0
+
+            # Verificar si este usuario ya tiene un turno activo
+            # (caso: el sistema se cerró inesperadamente y se vuelve a abrir)
+            self.turno_existente = sesion.query(Turno).filter(
+                Turno.usuario_id == usuario["id"],
+                Turno.activo == True,
+            ).order_by(Turno.hora_inicio.desc()).first()
+
+            if self.turno_existente:
+                # Usar la tasa con la que se abrió el turno original
+                self.tasa_actual = self.turno_existente.tasa_inicial
         finally:
             sesion.close()
 
-        # Campos del formulario
+        # Campos del formulario (solo se usan si no hay turno activo)
         self.campo_usd = ft.TextField(
             label="Efectivo USD en Caja",
             value=f"{saldo_chica_usd:.2f}",
@@ -112,7 +123,25 @@ class DialogoAperturaTurno:
             sesion.close()
 
     def mostrar(self):
-        """Construye y abre el diálogo de apertura de turno."""
+        """
+        Si el usuario ya tiene un turno activo (el sistema se reinició),
+        omite el diálogo y entra directo al dashboard reutilizando ese turno.
+        """
+        if self.turno_existente:
+            # Registrar el ID del turno en la sesión de página para el cierre
+            self.pagina.session.set("id_turno_actual", self.turno_existente.id)
+            self.pagina.open(ft.SnackBar(
+                ft.Text(
+                    f"Turno del {self.turno_existente.hora_inicio.strftime('%d/%m/%Y %H:%M')} "
+                    f"retomado — Tasa Bs. {self.tasa_actual:.2f}",
+                    color=ft.Colors.WHITE,
+                ),
+                bgcolor=ft.Colors.BLUE_700,
+                duration=4000,
+            ))
+            self.al_completar(self.tasa_actual)
+            return
+
         self.dialogo = ft.AlertDialog(
             modal=True,
             title=ft.Row([

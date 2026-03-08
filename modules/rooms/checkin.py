@@ -79,7 +79,11 @@ class DialogoCheckIn:
         self.campo_nombre.focus()
 
     def buscar_huesped(self, evento):
-        """Rellena los campos del titular si el documento ya existe en la BD."""
+        """
+        Rellena los campos del titular si el documento ya existe en la BD.
+        Si el huésped está en lista negra, muestra una advertencia bloqueante.
+        Si tiene deuda registrada (credito_usd negativo), informa al recepcionista.
+        """
         if not self.campo_documento.value:
             return
         sesion = SesionLocal()
@@ -94,9 +98,77 @@ class DialogoCheckIn:
             self.campo_profesion.value    = huesped.profesion
             self.campo_telefono.value     = huesped.telefono
             self.campo_vehiculo.value     = huesped.vehiculo
-            self.pagina.open(ft.SnackBar(
-                ft.Text(f"Huésped {huesped.nombre} cargado"), bgcolor="green"
-            ))
+
+            # ── Alerta de lista negra ──────────────────────────────────────
+            if huesped.lista_negra:
+                motivo = huesped.motivo_veto or "Sin motivo especificado."
+                dlg_veto = ft.AlertDialog(
+                    modal=True,
+                    title=ft.Row([
+                        ft.Icon(ft.Icons.BLOCK, color=ft.Colors.RED_700, size=22),
+                        ft.Text("HUÉSPED EN LISTA NEGRA", color=ft.Colors.RED_700,
+                                weight="bold"),
+                    ], spacing=8),
+                    content=ft.Container(
+                        width=400,
+                        content=ft.Column([
+                            ft.Text(huesped.nombre_completo, size=15, weight="bold"),
+                            ft.Text(f"Documento: {huesped.documento}", size=12,
+                                    color=ft.Colors.GREY_600),
+                            ft.Divider(),
+                            ft.Container(
+                                content=ft.Column([
+                                    ft.Text("Motivo del veto:", size=11,
+                                            color=ft.Colors.GREY_600),
+                                    ft.Text(motivo, size=13, color=ft.Colors.RED_800,
+                                            weight="bold"),
+                                ], spacing=4),
+                                bgcolor=ft.Colors.RED_50, padding=12,
+                                border_radius=8,
+                                border=ft.border.all(1, ft.Colors.RED_200),
+                            ),
+                            ft.Text(
+                                "Puedes continuar el check-in bajo tu responsabilidad "
+                                "o cancelar la operación.",
+                                size=11, color=ft.Colors.GREY_600, italic=True,
+                            ),
+                        ], spacing=10, tight=True),
+                    ),
+                    actions=[
+                        ft.TextButton(
+                            "Cancelar check-in",
+                            style=ft.ButtonStyle(color=ft.Colors.RED_700),
+                            on_click=lambda _: (
+                                self.pagina.close(dlg_veto),
+                                self.pagina.close(self.dialogo),
+                            ),
+                        ),
+                        ft.ElevatedButton(
+                            "Continuar de todas formas",
+                            bgcolor=ft.Colors.ORANGE_700, color="white",
+                            on_click=lambda _: self.pagina.close(dlg_veto),
+                        ),
+                    ],
+                    actions_alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                )
+                self.pagina.open(dlg_veto)
+
+            # ── Alerta de deuda pendiente ──────────────────────────────────
+            elif (huesped.credito_usd or 0.0) < -0.01:
+                deuda = abs(huesped.credito_usd)
+                self.pagina.open(ft.SnackBar(
+                    ft.Text(
+                        f"⚠ {huesped.nombre} tiene una deuda de ${deuda:.2f} "
+                        "de estadías anteriores. Se cargará automáticamente.",
+                        color=ft.Colors.WHITE,
+                    ),
+                    bgcolor=ft.Colors.ORANGE_800,
+                    duration=6000,
+                ))
+            else:
+                self.pagina.open(ft.SnackBar(
+                    ft.Text(f"Huésped {huesped.nombre} cargado"), bgcolor="green"
+                ))
         sesion.close()
         self.pagina.update()
 
@@ -238,6 +310,22 @@ class DialogoCheckIn:
                 monto_usd  = monto_total,
                 cancelada  = False,
             ))
+
+            # 6. Si el titular tiene deuda de estadías anteriores (credito_usd < 0),
+            #    cargarla automáticamente como línea de saldo pendiente.
+            titular_bd_fresco = sesion.get(Huesped, titular.id)
+            if titular_bd_fresco and (titular_bd_fresco.credito_usd or 0.0) < -0.01:
+                deuda_anterior = abs(titular_bd_fresco.credito_usd)
+                sesion.add(LineaCuenta(
+                    estadia_id = self.estadia_actual.id,
+                    tipo       = TipoLinea.SALDO_PENDIENTE,
+                    concepto   = f"Deuda de estadías anteriores",
+                    monto_usd  = round(deuda_anterior, 2),
+                    cancelada  = False,
+                ))
+                # Limpiar la deuda del perfil (ahora está como línea de cuenta)
+                titular_bd_fresco.credito_usd = 0.0
+
             sesion.commit()
             sesion.refresh(self.estadia_actual)
 

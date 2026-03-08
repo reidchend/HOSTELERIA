@@ -28,10 +28,15 @@ class DialogoDetallesHabitacion:
     la TransaccionCobro correspondiente.
     """
 
-    def __init__(self, pagina: ft.Page, habitacion: Habitacion, al_solicitar_checkout):
+    def __init__(self, pagina: ft.Page, habitacion: Habitacion,
+                 al_solicitar_checkout, al_actualizar_grid=None):
         self.pagina                = pagina
         self.habitacion            = habitacion
         self.al_solicitar_checkout = al_solicitar_checkout
+        # Callback opcional que el dashboard inyecta para que el diálogo
+        # pueda notificar cuando cambia algo (renovación, cargo extra, cobro)
+        # y el grid se actualice sin reconstruir toda la interfaz.
+        self.al_actualizar_grid    = al_actualizar_grid
         self.dialogo               = None
         self.estadia_activa        = None
 
@@ -197,7 +202,6 @@ class DialogoDetallesHabitacion:
                         icon=ft.Icons.EXIT_TO_APP,
                         bgcolor="red", color="white",
                         on_click=lambda _: self.al_solicitar_checkout(self.habitacion),
-                        disabled=total_pendiente > 0.01,
                     ),
                 ],
                 actions_alignment=ft.MainAxisAlignment.END,
@@ -752,8 +756,20 @@ class DialogoDetallesHabitacion:
         ).mostrar()
 
     def refrescar_detalles(self):
+        """
+        Se llama tras cualquier operación que modifique la estadía
+        (cobro, cargo extra, renovación). Hace dos cosas:
+        1. Reabre el diálogo con datos frescos de la BD.
+        2. Notifica al dashboard para que actualice el grid y las tarjetas
+           de resumen sin reconstruir toda la interfaz — así los indicadores
+           de cuentas pendientes y la fecha de salida aparecen al instante.
+        """
         if self.dialogo:
             self.pagina.close(self.dialogo)
+        # Notificar al dashboard ANTES de reabrir el diálogo, para que el
+        # grid ya muestre el estado actualizado cuando el usuario lo cierre.
+        if self.al_actualizar_grid:
+            self.al_actualizar_grid()
         self.mostrar()
 
     def mostrar(self):

@@ -71,6 +71,8 @@ class Huesped(Base):
     telefono         = Column(String(20))
     vehiculo         = Column(String(100), nullable=True)            # Placa / marca del vehículo
     credito_usd      = Column(Float, default=0.0)                    # Saldo a favor entre estadías
+    lista_negra      = Column(Boolean, default=False)               # Huésped vetado
+    motivo_veto      = Column(String(300), nullable=True)           # Razón del veto
 
     @property
     def nombre_completo(self):
@@ -129,6 +131,7 @@ class Estadia(Base):
     salida        = Column(DateTime, nullable=True)                  # Check-out estimado
     activa        = Column(Boolean, default=True)
     deposito_usd  = Column(Float, default=0.0)                       # Adelantos / saldo en la estadía
+    notas         = Column(String(1000), nullable=True)              # Observaciones de la estadía
 
     # Relaciones
     habitacion    = relationship("Habitacion", back_populates="estadias_activas")
