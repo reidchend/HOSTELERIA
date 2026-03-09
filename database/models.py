@@ -79,6 +79,22 @@ class Huesped(Base):
         """Devuelve el nombre y apellido unidos, útil para mostrar en pantalla."""
         return f"{self.nombre} {self.apellido}"
 
+    # Método para acreditar saldo a favor
+    def acreditar_saldo(self, monto: float):
+        """Acredita un monto al saldo a favor del huésped."""
+        if monto > 0:
+            self.credito_usd += monto
+
+    # Método para usar saldo a favor
+    def usar_saldo(self, monto: float) -> float:
+        """Descuenta un monto del saldo a favor, devolviendo el monto restante si no es suficiente."""
+        if monto <= self.credito_usd:
+            self.credito_usd -= monto
+            return 0.0
+        restante = monto - self.credito_usd
+        self.credito_usd = 0.0
+        return restante
+
 
 class Habitacion(Base):
     """

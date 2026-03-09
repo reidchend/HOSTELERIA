@@ -1,8 +1,12 @@
 # modules/finance/extra_charges.py
 
+from datetime import datetime
+from logging import config
+
 import flet as ft
 from database.connection import SesionLocal
 from database.models import CargoExtra, Estadia, LineaCuenta, TipoLinea, Pago, MetodoPago
+from utils.calculos_financieros import a_bs
 
 
 class DialogoCargoExtra:

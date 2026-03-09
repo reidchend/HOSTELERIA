@@ -76,7 +76,6 @@ class DialogoCheckIn:
     def evento_buscar_huesped(self, evento):
         """Busca el huésped al pulsar Enter en el campo de documento."""
         self.buscar_huesped(evento)
-        self.campo_nombre.focus()
 
     def buscar_huesped(self, evento):
         """
@@ -99,59 +98,67 @@ class DialogoCheckIn:
             self.campo_telefono.value     = huesped.telefono
             self.campo_vehiculo.value     = huesped.vehiculo
 
-            # ── Alerta de lista negra ──────────────────────────────────────
+            # ── Alerta de lista negra — INLINE dentro del diálogo de check-in ──
+            # NO se abre un nuevo dialog (Flet 0.28.3 no distingue por referencia
+            # al cerrar y podría cerrar el dialog de check-in por error).
+            # En su lugar se reemplaza el contenido del dialogo existente.
             if huesped.lista_negra:
                 motivo = huesped.motivo_veto or "Sin motivo especificado."
-                dlg_veto = ft.AlertDialog(
-                    modal=True,
-                    title=ft.Row([
-                        ft.Icon(ft.Icons.BLOCK, color=ft.Colors.RED_700, size=22),
-                        ft.Text("HUÉSPED EN LISTA NEGRA", color=ft.Colors.RED_700,
-                                weight="bold"),
-                    ], spacing=8),
-                    content=ft.Container(
-                        width=400,
-                        content=ft.Column([
-                            ft.Text(huesped.nombre_completo, size=15, weight="bold"),
-                            ft.Text(f"Documento: {huesped.documento}", size=12,
-                                    color=ft.Colors.GREY_600),
-                            ft.Divider(),
-                            ft.Container(
-                                content=ft.Column([
-                                    ft.Text("Motivo del veto:", size=11,
-                                            color=ft.Colors.GREY_600),
-                                    ft.Text(motivo, size=13, color=ft.Colors.RED_800,
-                                            weight="bold"),
-                                ], spacing=4),
-                                bgcolor=ft.Colors.RED_50, padding=12,
-                                border_radius=8,
-                                border=ft.border.all(1, ft.Colors.RED_200),
-                            ),
-                            ft.Text(
-                                "Puedes continuar el check-in bajo tu responsabilidad "
-                                "o cancelar la operación.",
-                                size=11, color=ft.Colors.GREY_600, italic=True,
-                            ),
-                        ], spacing=10, tight=True),
-                    ),
-                    actions=[
-                        ft.TextButton(
-                            "Cancelar check-in",
-                            style=ft.ButtonStyle(color=ft.Colors.RED_700),
-                            on_click=lambda _: (
-                                self.pagina.close(dlg_veto),
-                                self.pagina.close(self.dialogo),
-                            ),
+
+                # Guardar el contenido original para poder restaurarlo
+                contenido_original = self.dialogo.content
+                acciones_originales = self.dialogo.actions
+
+                def _continuar_checkin(_):
+                    # Restaurar el contenido original del check-in
+                    self.dialogo.content = contenido_original
+                    self.dialogo.actions = acciones_originales
+                    self.dialogo.update()
+
+                def _cancelar_checkin(_):
+                    self.pagina.close(self.dialogo)
+
+                self.dialogo.content = ft.Container(
+                    width=500,
+                    content=ft.Column([
+                        ft.Row([
+                            ft.Icon(ft.Icons.BLOCK, color=ft.Colors.RED_700, size=28),
+                            ft.Column([
+                                ft.Text("HUÉSPED EN LISTA NEGRA",
+                                        color=ft.Colors.RED_700, weight="bold", size=15),
+                                ft.Text(huesped.nombre_completo, size=13,
+                                        color=ft.Colors.GREY_800),
+                            ], spacing=2),
+                        ], spacing=10),
+                        ft.Container(
+                            content=ft.Column([
+                                ft.Text("Motivo del veto:", size=11, color=ft.Colors.GREY_600),
+                                ft.Text(motivo, size=13, color=ft.Colors.RED_800,
+                                        weight="bold"),
+                            ], spacing=4),
+                            bgcolor=ft.Colors.RED_50, padding=12, border_radius=8,
+                            border=ft.border.all(1, ft.Colors.RED_200),
                         ),
-                        ft.ElevatedButton(
-                            "Continuar de todas formas",
-                            bgcolor=ft.Colors.ORANGE_700, color="white",
-                            on_click=lambda _: self.pagina.close(dlg_veto),
+                        ft.Text(
+                            "Puedes continuar el check-in bajo tu responsabilidad "
+                            "o cancelar la operación.",
+                            size=11, color=ft.Colors.GREY_600, italic=True,
                         ),
-                    ],
-                    actions_alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                    ], spacing=12, tight=True),
                 )
-                self.pagina.open(dlg_veto)
+                self.dialogo.actions = [
+                    ft.TextButton(
+                        "✕ Cancelar check-in",
+                        style=ft.ButtonStyle(color=ft.Colors.RED_700),
+                        on_click=_cancelar_checkin,
+                    ),
+                    ft.ElevatedButton(
+                        "Continuar de todas formas →",
+                        bgcolor=ft.Colors.ORANGE_700, color="white",
+                        on_click=_continuar_checkin,
+                    ),
+                ]
+                self.dialogo.update()
 
             # ── Alerta de deuda pendiente ──────────────────────────────────
             elif (huesped.credito_usd or 0.0) < -0.01:
