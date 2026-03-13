@@ -1,8 +1,27 @@
+# modules/finance/gestor_vuelto.py
+#
+# Componente reutilizable para gestionar la entrega de vueltos / devoluciones.
+#
+# FUENTES DE VUELTO:
+#   Cajas físicas  → Caja Principal USD  /  Caja Chica USD
+#                    Caja Principal Bs   /  Caja Chica Bs
+#   Administración → Pago Móvil (electrónico, sin salida de caja física)
+#                    Transferencia Bs    (electrónico, sin salida de caja física)
+#
+# USO:
+#   gestor = GestorVuelto(monto_usd=15.00, tasa=36.5, pagina=pagina)
+#   widget = gestor.construir()   # ft.Container listo para embeber inline
+#
+#   # antes del commit:
+#   if not gestor.es_valido():
+#       raise Exception("Distribución del vuelto incompleta")
+#   gestor.aplicar(sesion, estadia_id=estadia.id)
 
 import flet as ft
 from datetime import datetime
-from database.models import Pago, Caja, MetodoPago, Huesped
+from database.models import Pago, Caja, MetodoPago
 from utils.calculos_financieros import a_bs, a_usd
+from modules.finance.engine import ledger as led
 
 
 class GestorVuelto:
@@ -267,7 +286,7 @@ class GestorVuelto:
                 MetodoPago.CASH_USD,
                 "Efectivo USD — Caja Principal",
                 lambda: setattr(caja, "saldo_principal_usd",
-                                caja.saldo_principal_usd - v_ppal_usd) if caja else None,
+                                __import__("decimal").Decimal(str(caja.saldo_principal_usd or 0)) - __import__("decimal").Decimal(str(v_ppal_usd))) if caja else None,
             ),
             (
                 v_chica_usd,
@@ -275,7 +294,7 @@ class GestorVuelto:
                 MetodoPago.CASH_USD,
                 "Efectivo USD — Caja Chica",
                 lambda: setattr(caja, "caja_chica_usd",
-                                caja.caja_chica_usd - v_chica_usd) if caja else None,
+                                __import__("decimal").Decimal(str(caja.caja_chica_usd or 0)) - __import__("decimal").Decimal(str(v_chica_usd))) if caja else None,
             ),
             (
                 a_usd(v_ppal_bs, tasa),
@@ -283,7 +302,7 @@ class GestorVuelto:
                 MetodoPago.CASH_BS,
                 "Efectivo Bs — Caja Principal",
                 lambda: setattr(caja, "saldo_principal_bs",
-                                caja.saldo_principal_bs - v_ppal_bs) if caja else None,
+                                __import__("decimal").Decimal(str(caja.saldo_principal_bs or 0)) - __import__("decimal").Decimal(str(v_ppal_bs))) if caja else None,
             ),
             (
                 a_usd(v_chica_bs, tasa),
@@ -291,7 +310,7 @@ class GestorVuelto:
                 MetodoPago.CASH_BS,
                 "Efectivo Bs — Caja Chica",
                 lambda: setattr(caja, "caja_chica_bs",
-                                caja.caja_chica_bs - v_chica_bs) if caja else None,
+                                __import__("decimal").Decimal(str(caja.caja_chica_bs or 0)) - __import__("decimal").Decimal(str(v_chica_bs))) if caja else None,
             ),
             (
                 a_usd(v_pm_bs, tasa),
@@ -309,11 +328,12 @@ class GestorVuelto:
             ),
         ]
 
+        from decimal import Decimal as _D
         for monto_usd_f, monto_bs_f, metodo, desc, descontar in fuentes:
             if monto_usd_f < 0.01 and monto_bs_f < 0.01:
                 continue  # fuente no utilizada
             descontar()
-            sesion.add(Pago(
+            nuevo_pago = Pago(
                 estadia_id    = estadia_id,
                 monto_usd     = round(monto_usd_f, 2),
                 monto_bs      = round(monto_bs_f,  2),
@@ -323,22 +343,15 @@ class GestorVuelto:
                 descripcion   = f"Vuelto — {desc}",
                 creado_en     = ahora,
                 es_devolucion = True,
-            ))
-
-        # ── Registrar saldo a favor si hay diferencia ────────────────────────
-        diferencia = self.monto_usd - self.total_configurado_usd()
-        if diferencia > 0.02:
-            huesped = sesion.query(Huesped).filter_by(estadia_id=estadia_id).first()
-            if huesped:
-                huesped.acreditar_saldo(diferencia)
-                sesion.add(Pago(
-                    estadia_id    = estadia_id,
-                    monto_usd     = 0.0,
-                    monto_bs      = 0.0,
-                    tasa_cambio   = self.tasa,
-                    metodo        = MetodoPago.SALDO_FAVOR,
-                    referencia    = "Saldo a favor",
-                    descripcion   = f"Saldo a favor acreditado: ${diferencia:.2f}",
-                    creado_en     = ahora,
-                    es_devolucion = True,
-                ))
+            )
+            sesion.add(nuevo_pago)
+            sesion.flush()
+            led.registrar_devolucion(
+                sesion,
+                estadia_id = estadia_id,
+                concepto   = f"Vuelto — {desc}",
+                monto_usd  = _D(str(round(monto_usd_f, 4))),
+                tasa       = _D(str(tasa)),
+                referencia = desc,
+                pago_id    = nuevo_pago.id,
+            )

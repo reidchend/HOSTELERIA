@@ -1,0 +1,191 @@
+PLAN DE REDISEÑO DEL MOTOR FINANCIERO
+
+Proyecto: Sistema de Hostelería
+
+Este documento describe el rediseño del motor financiero del sistema,
+las observaciones detectadas en el proyecto actual y el plan paso a paso
+para implementar una arquitectura financiera robusta.
+
+  ----------------------------------------------
+  1. PROBLEMAS DETECTADOS EN EL SISTEMA ACTUAL
+  ----------------------------------------------
+
+1.  Uso mixto de float y Decimal en cálculos financieros.
+2.  No existe un libro contable centralizado (ledger).
+3.  Los pagos no generan movimientos contables auditables.
+4.  La tasa de cambio no se guarda en cada transacción.
+5.  El cálculo de impuestos es global y no por línea de producto.
+6.  El saldo de una estadía se calcula mediante restas simples en lugar
+    de un registro contable.
+
+Esto puede provocar inconsistencias financieras y dificulta la auditoría
+del sistema.
+
+  --------------------------
+  2. OBJETIVO DEL REDISEÑO
+  --------------------------
+
+Crear un motor financiero profesional basado en un libro contable
+(ledger).
+
+Cada operación financiera generará un movimiento contable.
+
+Beneficios:
+
+-   Auditoría completa
+-   Historial financiero
+-   Soporte para pagos parciales
+-   Soporte multi-moneda
+-   Manejo correcto de impuestos
+-   Base sólida para reportes financieros
+
+  ---------------------------------
+  3. NUEVA ARQUITECTURA PROPUESTA
+  ---------------------------------
+
+Se agregará un nuevo módulo llamado:
+
+finance/
+
+Estructura:
+
+finance/ init.py ledger.py folio_engine.py payments.py taxes.py
+
+Descripción:
+
+ledger.py Libro contable central del sistema.
+
+folio_engine.py Motor que calcula los cargos de una estadía.
+
+payments.py Motor que registra pagos y genera movimientos contables.
+
+taxes.py Motor encargado del cálculo de impuestos.
+
+  -------------------------------------------
+  4. CAMBIOS NECESARIOS EN LA BASE DE DATOS
+  -------------------------------------------
+
+Se deben crear tres tablas nuevas.
+
+Tabla 1: ledger_movimientos
+
+CREATE TABLE ledger_movimientos ( id INTEGER PRIMARY KEY AUTOINCREMENT,
+fecha DATETIME, estadia_id INTEGER, tipo TEXT, concepto TEXT, debe_usd
+DECIMAL(12,2), haber_usd DECIMAL(12,2), moneda TEXT, tasa_cambio
+DECIMAL(12,4), usuario TEXT, referencia TEXT );
+
+Tipos de movimiento: CARGO PAGO DEVOLUCION AJUSTE
+
+Tabla 2: folio_lineas
+
+CREATE TABLE folio_lineas ( id INTEGER PRIMARY KEY AUTOINCREMENT,
+estadia_id INTEGER, descripcion TEXT, cantidad DECIMAL(10,2),
+precio_unitario DECIMAL(10,2), aplica_iva BOOLEAN, categoria TEXT );
+
+Tabla 3: pagos
+
+CREATE TABLE pagos ( id INTEGER PRIMARY KEY AUTOINCREMENT, estadia_id
+INTEGER, metodo_pago TEXT, monto_usd DECIMAL(12,2), moneda TEXT,
+tasa_cambio DECIMAL(12,4), fecha DATETIME, usuario TEXT );
+
+  ----------------------------
+  5. ARCHIVOS NUEVOS A CREAR
+  ----------------------------
+
+Crear carpeta:
+
+finance
+
+Dentro crear:
+
+ledger.py folio_engine.py payments.py taxes.py
+
+  --------------------------
+  6. FUNCIONES PRINCIPALES
+  --------------------------
+
+ledger.py
+
+registrar_movimiento() saldo_estadia()
+
+folio_engine.py
+
+calcular_folio() obtener_lineas()
+
+payments.py
+
+registrar_pago()
+
+taxes.py
+
+calcular_iva() calcular_total()
+
+  -------------------------------------------
+  7. CAMBIOS NECESARIOS EN EL CÓDIGO ACTUAL
+  -------------------------------------------
+
+1.  Reemplazar cálculos directos en utils/calculos_financieros.py por el
+    nuevo FolioEngine.
+
+2.  Modificar modules/finance/payment_dialog.py para usar
+    PaymentEngine.registrar_pago()
+
+3.  Cada vez que se cree un cargo (habitación, minibar, servicio) se
+    debe registrar un movimiento tipo CARGO en ledger_movimientos.
+
+4.  El saldo de una estadía debe calcularse usando:
+
+saldo = SUM(debe) - SUM(haber)
+
+  ---------------------------------------
+  8. NUEVO FLUJO FINANCIERO DEL SISTEMA
+  ---------------------------------------
+
+CHECK-IN
+
+Se crea la estadía.
+
+CARGOS
+
+Se insertan registros en: folio_lineas
+
+Luego se registra un movimiento en: ledger_movimientos (tipo CARGO)
+
+PAGOS
+
+Se inserta registro en: pagos
+
+Luego se registra movimiento en: ledger_movimientos (tipo PAGO)
+
+SALDO
+
+saldo = SUM(debe) - SUM(haber)
+
+  -------------------------
+  9. PRUEBAS RECOMENDADAS
+  -------------------------
+
+Escenario 1 Cargo de habitación
+
+Escenario 2 Pago parcial
+
+Escenario 3 Pago completo
+
+Escenario 4 Devolución
+
+Escenario 5 Consulta de saldo
+
+  ----------------------------
+  10. RESULTADO DEL REDISEÑO
+  ----------------------------
+
+El sistema pasará de un modelo simple a un motor financiero basado en
+contabilidad interna.
+
+Beneficios:
+
+-   Auditoría completa
+-   Historial financiero detallado
+-   Reducción de errores contables
+-   Soporte para crecimiento del sistema
+-   Base para reportes financieros profesionales

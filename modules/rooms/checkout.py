@@ -17,8 +17,10 @@ from sqlalchemy.orm import selectinload
 from database.connection import SesionLocal
 from database.models import (
     Habitacion, Estadia, Huesped, Pago, Caja,
-    MetodoPago, LineaCuenta, EstadoHabitacion,
+    MetodoPago, FolioLinea, TipoLinea, EstadoHabitacion,
 )
+from modules.finance.engine import folio as folio_engine
+from modules.finance.engine import ledger as led
 from utils.calculos_financieros import leer_config_financiera, a_bs, a_usd
 from modules.finance.gestor_vuelto import GestorVuelto
 
@@ -94,7 +96,7 @@ class CheckOutWizard:
                 sesion.query(Estadia)
                 .options(
                     selectinload(Estadia.huespedes),
-                    selectinload(Estadia.lineas_cuenta),
+                    selectinload(Estadia.folio_lineas),
                     selectinload(Estadia.pagos),
                 )
                 .filter(
@@ -107,8 +109,8 @@ class CheckOutWizard:
                 return
             self._estadia  = est
             self._titular  = est.huespedes[0] if est.huespedes else None
-            self._total_pend = round(sum(l.monto_usd for l in est.lineas_cuenta if not l.cancelada), 2)
-            self._credito    = round(self._titular.credito_usd or 0.0, 2) if self._titular else 0.0
+            self._total_pend = round(sum(float(l.total_usd) for l in est.folio_lineas if not l.cancelada), 2)
+            self._credito    = round(float(self._titular.credito_usd or 0), 2) if self._titular else 0.0
         finally:
             sesion.close()
 
@@ -710,33 +712,55 @@ class CheckOutWizard:
                     titular_bd.motivo_veto = self._motivo_veto.strip()
 
             # C. Financiero
+            from decimal import Decimal as _D
             if self._total_pend > 0.01:
                 if self._decision == "cobrar":
+                    ids_folio = [l.id for l in est_bd.folio_lineas if not l.cancelada]
                     for p in self._pagos_cobro:
-                        sesion.add(Pago(
-                            estadia_id=est_bd.id, monto_usd=p["monto_usd"],
-                            monto_bs=p["monto_bs"], tasa_cambio=tasa,
-                            metodo=p["metodo"], referencia=p.get("referencia", ""),
-                            descripcion="Cobro de deuda en Check-Out",
-                            creado_en=datetime.now(), es_devolucion=False,
-                        ))
+                        nuevo_pago = Pago(
+                            estadia_id    = est_bd.id,
+                            monto_usd     = p["monto_usd"],
+                            monto_bs      = p["monto_bs"],
+                            tasa_cambio   = tasa,
+                            metodo        = p["metodo"],
+                            referencia    = p.get("referencia", ""),
+                            descripcion   = "Cobro de deuda en Check-Out",
+                            creado_en     = datetime.now(),
+                            es_devolucion = False,
+                        )
+                        sesion.add(nuevo_pago)
+                        sesion.flush()
                         if p["metodo"] in [MetodoPago.CASH_USD, MetodoPago.ZELLE, MetodoPago.DEBIT_CARD]:
-                            if caja: caja.saldo_principal_usd += p["monto_usd"]
+                            if caja:
+                                caja.saldo_principal_usd = (
+                                    _D(str(caja.saldo_principal_usd or 0)) + _D(str(p["monto_usd"]))
+                                )
                         else:
-                            if caja: caja.saldo_principal_bs  += p["monto_bs"]
-                    for l in est_bd.lineas_cuenta:
-                        if not l.cancelada:
-                            l.cancelada = True
+                            if caja:
+                                caja.saldo_principal_bs = (
+                                    _D(str(caja.saldo_principal_bs or 0)) + _D(str(p["monto_bs"]))
+                                )
+                        led.registrar_pago(
+                            sesion,
+                            estadia_id = est_bd.id,
+                            concepto   = "Cobro de deuda en Check-Out",
+                            monto_usd  = _D(str(p["monto_usd"])),
+                            tasa       = _D(str(tasa)),
+                            pago_id    = nuevo_pago.id,
+                        )
+                    folio_engine.cancelar_lineas(sesion, ids_folio)
+
                 elif self._decision == "registrar":
                     if titular_bd:
-                        titular_bd.credito_usd = (titular_bd.credito_usd or 0.0) - self._total_pend
+                        titular_bd.credito_usd = (
+                            _D(str(titular_bd.credito_usd or 0)) - _D(str(self._total_pend))
+                        )
 
             elif self._credito > 0.01 and self._decision == "vuelto":
-                # Delegar al GestorVuelto reutilizable (valida fondos y registra pagos)
+                # GestorVuelto valida fondos, registra Pagos y descuenta cajas
                 self._gestor_vuelto.aplicar(sesion, estadia_id=est_bd.id)
-                # Limpiar el saldo del titular
                 if titular_bd:
-                    titular_bd.credito_usd = 0.0
+                    titular_bd.credito_usd = _D("0")
                 # Si decision == 'credito': no tocar credito_usd
 
             # D. Cerrar estadía → habitación a LIMPIEZA

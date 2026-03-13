@@ -5,8 +5,10 @@ import flet as ft
 from database.connection import SesionLocal
 from database.models import (
     Pago, Caja, MetodoPago, Estadia, Huesped,
-    LineaCuenta, TipoLinea, TransaccionCobro,
+    FolioLinea, TipoLinea,
 )
+from modules.finance.engine import folio as folio_engine
+from modules.finance.engine import ledger as led
 from sqlalchemy.orm import selectinload
 from datetime import datetime
 from utils.calculos_financieros import leer_config_financiera, a_bs, a_usd
@@ -132,7 +134,7 @@ class DialogoPago:
     def _cargar_lineas(self, sesion):
         if not self.lineas_ids:
             return []
-        return sesion.query(LineaCuenta).filter(LineaCuenta.id.in_(self.lineas_ids)).all()
+        return sesion.query(FolioLinea).filter(FolioLinea.id.in_(self.lineas_ids)).all()
 
     def _datos_para_panel(self, sesion):
         estadia = (
@@ -257,8 +259,8 @@ class DialogoPago:
                         ),
                     ], spacing=2, expand=True),
                     ft.Column(controls=[
-                        ft.Text(f"${linea.monto_usd:.2f}", size=12, weight="bold", text_align=ft.TextAlign.RIGHT),
-                        ft.Text(f"Bs.{a_bs(linea.monto_usd, tasa):,.0f}", size=9, color=ft.Colors.GREY_500, text_align=ft.TextAlign.RIGHT),
+                        ft.Text(f"${float(linea.total_usd):.2f}", size=12, weight="bold", text_align=ft.TextAlign.RIGHT),
+                        ft.Text(f"Bs.{a_bs(float(linea.total_usd), tasa):,.0f}", size=9, color=ft.Colors.GREY_500, text_align=ft.TextAlign.RIGHT),
                     ], spacing=1, horizontal_alignment=ft.CrossAxisAlignment.END),
                 ], spacing=8),
                 padding=ft.padding.symmetric(horizontal=8, vertical=6),
@@ -897,9 +899,11 @@ class DialogoPago:
                 .first()
             )
 
-            # ── 1. Registrar pagos ─────────────────────────────────────────────
+            from decimal import Decimal as _D2
+
+            # ── 1. Registrar cada Pago + asiento PAGO en el ledger ────────────
             for pago in self.pagos_sesion:
-                sesion.add(Pago(
+                nuevo_pago = Pago(
                     estadia_id    = self.id_estadia,
                     monto_usd     = pago["monto_usd"],
                     monto_bs      = pago["monto_bs"],
@@ -909,93 +913,109 @@ class DialogoPago:
                     descripcion   = pago.get("descripcion_extra", "Cobro de factura"),
                     creado_en     = datetime.now(),
                     es_devolucion = False,
-                ))
+                )
+                sesion.add(nuevo_pago)
+                sesion.flush()
 
+                # Actualizar caja y crédito según método
                 if pago.get("es_saldo_favor"):
                     monto_sf       = pago["monto_usd"]
                     huesped_ext_id = pago.get("huesped_externo_id")
                     doc_ext        = pago.get("huesped_externo_doc", "—")
                     nombre_ext     = pago.get("huesped_externo_nombre", "")
-
                     if huesped_ext_id:
-                        # Descuenta del crédito del huésped EXTERNO
                         h_ext = sesion.get(Huesped, huesped_ext_id)
                         if h_ext:
-                            h_ext.credito_usd = max(0.0, (h_ext.credito_usd or 0.0) - monto_sf)
-                        pago["descripcion_extra"] = (
+                            h_ext.credito_usd = max(
+                                _D2("0"),
+                                (_D2(str(h_ext.credito_usd or 0)) - _D2(str(monto_sf)))
+                            )
+                        nuevo_pago.descripcion = (
                             f"Saldo aplicado de {nombre_ext} (doc: {doc_ext}) a estadía #{self.id_estadia}"
                         )
                     else:
-                        # Descuenta del crédito del TITULAR de esta estadía
                         if estadia_bd and estadia_bd.huespedes:
                             titular = sesion.get(Huesped, estadia_bd.huespedes[0].id)
                             if titular:
-                                titular.credito_usd = max(0.0, (titular.credito_usd or 0.0) - monto_sf)
-
+                                titular.credito_usd = max(
+                                    _D2("0"),
+                                    (_D2(str(titular.credito_usd or 0)) - _D2(str(monto_sf)))
+                                )
                 elif pago["metodo"] in [MetodoPago.CASH_USD, MetodoPago.ZELLE, MetodoPago.DEBIT_CARD]:
-                    caja.saldo_principal_usd += pago["monto_usd"]
+                    caja.saldo_principal_usd = (
+                        _D2(str(caja.saldo_principal_usd or 0)) + _D2(str(pago["monto_usd"]))
+                    )
                 else:
-                    caja.saldo_principal_bs  += pago["monto_bs"]
+                    caja.saldo_principal_bs = (
+                        _D2(str(caja.saldo_principal_bs or 0)) + _D2(str(pago["monto_bs"]))
+                    )
 
-            # ── 2. Crear TransaccionCobro ──────────────────────────────────────
+                # Asiento contable PAGO
+                led.registrar_pago(
+                    sesion,
+                    estadia_id = self.id_estadia,
+                    concepto   = nuevo_pago.descripcion or "Pago",
+                    monto_usd  = _D2(str(pago["monto_usd"])),
+                    tasa       = _D2(str(tasa)),
+                    referencia = pago.get("referencia") or "—",
+                    pago_id    = nuevo_pago.id,
+                )
+
+            # ── 2. Marcar líneas del folio como canceladas ────────────────────
+            folio_engine.cancelar_lineas(sesion, self.lineas_ids)
             saldo_pendiente_tx = max(0.0, round(pendiente, 2))
-            transaccion = TransaccionCobro(
-                estadia_id         = self.id_estadia,
-                total_seleccionado = self.total_a_pagar,
-                total_pagado       = round(total_pagado_usd, 2),
-                saldo_pendiente    = saldo_pendiente_tx,
-                creado_en          = datetime.now(),
-            )
-            sesion.add(transaccion)
-            sesion.flush()
 
-            # ── 3. Marcar líneas como canceladas ──────────────────────────────
-            for linea_id in self.lineas_ids:
-                linea = sesion.get(LineaCuenta, linea_id)
-                if linea:
-                    linea.cancelada      = True
-                    linea.transaccion_id = transaccion.id
-
-            # ── 4. Pago parcial → SALDO_PENDIENTE ─────────────────────────────
+            # ── 3. Pago parcial → nueva FolioLinea + CARGO en ledger ──────────
             if saldo_pendiente_tx > 0.01:
-                conceptos = []
-                for linea_id in self.lineas_ids:
-                    linea = sesion.get(LineaCuenta, linea_id)
-                    if linea:
-                        conceptos.append(linea.concepto)
+                conceptos = [
+                    sesion.get(FolioLinea, lid).concepto
+                    for lid in self.lineas_ids
+                    if sesion.get(FolioLinea, lid)
+                ]
                 resumen = "; ".join(conceptos[:3])
                 if len(conceptos) > 3:
                     resumen += f" (+{len(conceptos)-3} más)"
-                sesion.add(LineaCuenta(
-                    estadia_id     = self.id_estadia,
-                    transaccion_id = transaccion.id,
-                    tipo           = TipoLinea.SALDO_PENDIENTE,
-                    concepto       = f"Saldo pendiente de cobro — {resumen}",
-                    monto_usd      = saldo_pendiente_tx,
-                    cancelada      = False,
-                    creado_en      = datetime.now(),
-                ))
+                folio_engine.crear_saldo_pendiente(
+                    sesion,
+                    estadia_id = self.id_estadia,
+                    monto_usd  = _D2(str(saldo_pendiente_tx)),
+                    concepto   = f"Saldo pendiente — {resumen}",
+                    config     = self.config,
+                )
 
-            # ── 5. Sobrante (pagó de más) ──────────────────────────────────────
+            # ── 4. Sobrante (pagó de más) ─────────────────────────────────────
             elif pendiente < -0.01:
                 monto_sobrante = abs(pendiente)
 
                 modo_sobrante = getattr(self, "_radio_sobrante_valor", "credito")
                 if modo_sobrante == "credito":
-                    # Acreditar en Huesped.credito_usd del titular
                     if estadia_bd and estadia_bd.huespedes:
                         titular = sesion.get(Huesped, estadia_bd.huespedes[0].id)
                         if titular:
-                            titular.credito_usd = (titular.credito_usd or 0.0) + monto_sobrante
-                    sesion.add(Pago(
-                        estadia_id=self.id_estadia, monto_usd=monto_sobrante,
-                        monto_bs=a_bs(monto_sobrante, tasa), es_devolucion=True,
-                        metodo=MetodoPago.CASH_USD, tasa_cambio=tasa,
-                        descripcion="Sobrante registrado como saldo a favor (crédito huésped)",
-                        creado_en=datetime.now(),
-                    ))
+                            titular.credito_usd = (
+                                _D2(str(titular.credito_usd or 0)) + _D2(str(monto_sobrante))
+                            )
+                    pago_sob = Pago(
+                        estadia_id    = self.id_estadia,
+                        monto_usd     = monto_sobrante,
+                        monto_bs      = a_bs(monto_sobrante, tasa),
+                        es_devolucion = True,
+                        metodo        = MetodoPago.CASH_USD,
+                        tasa_cambio   = tasa,
+                        descripcion   = "Sobrante → saldo a favor del huésped",
+                        creado_en     = datetime.now(),
+                    )
+                    sesion.add(pago_sob)
+                    sesion.flush()
+                    led.registrar_devolucion(
+                        sesion,
+                        estadia_id = self.id_estadia,
+                        concepto   = "Sobrante → saldo a favor del huésped",
+                        monto_usd  = _D2(str(monto_sobrante)),
+                        tasa       = _D2(str(tasa)),
+                        pago_id    = pago_sob.id,
+                    )
                 else:
-                    # Vuelto físico/admin — delegar al GestorVuelto
                     if self._gestor_vuelto is None or not self._gestor_vuelto.es_valido():
                         raise Exception(
                             "La distribución del vuelto está incompleta. "

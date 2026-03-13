@@ -2,7 +2,7 @@
 
 import flet as ft
 from datetime import date
-from database.models import Habitacion, EstadoHabitacion, Estadia, LineaCuenta
+from database.models import Habitacion, EstadoHabitacion, Estadia
 from database.connection import SesionLocal
 from sqlalchemy import cast, Integer
 from sqlalchemy.orm import selectinload

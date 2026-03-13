@@ -6,9 +6,11 @@ from sqlalchemy.orm import selectinload
 from database.connection import SesionLocal
 from database.models import (
     Habitacion, Estadia, Pago, Caja, MetodoPago,
-    LineaCuenta, TipoLinea, TransaccionCobro,
+    FolioLinea, TipoLinea, LedgerMovimiento, TipoMovimiento,
 )
 from utils.calculos_financieros import leer_config_financiera, a_bs
+from modules.finance.engine import folio as folio_engine
+from modules.finance.engine import ledger as led
 
 
 class DialogoDetallesHabitacion:
@@ -59,12 +61,9 @@ class DialogoDetallesHabitacion:
                     selectinload(Habitacion.estadias_activas)
                         .selectinload(Estadia.huespedes),
                     selectinload(Habitacion.estadias_activas)
-                        .selectinload(Estadia.lineas_cuenta)
-                        .selectinload(LineaCuenta.transaccion)
-                        .selectinload(TransaccionCobro.lineas),
+                        .selectinload(Estadia.folio_lineas),
                     selectinload(Habitacion.estadias_activas)
-                        .selectinload(Estadia.transacciones)
-                        .selectinload(TransaccionCobro.lineas),
+                        .selectinload(Estadia.ledger_movimientos),
                     selectinload(Habitacion.estadias_activas)
                         .selectinload(Estadia.pagos),
                 )
@@ -91,15 +90,14 @@ class DialogoDetallesHabitacion:
             titular      = estadia.huespedes[0] if estadia.huespedes else None
             acompanantes = estadia.huespedes[1:] if len(estadia.huespedes) > 1 else []
 
-            # Separar líneas pendientes de las agrupadas en transacciones
+            # Líneas sin cobrar del folio
             lineas_pendientes = [
-                l for l in estadia.lineas_cuenta
-                if not l.cancelada
+                l for l in estadia.folio_lineas if not l.cancelada
             ]
-            total_pendiente = sum(l.monto_usd for l in lineas_pendientes)
+            total_pendiente = sum(float(l.total_usd) for l in lineas_pendientes)
 
             total_pagado_bd = sum(
-                -p.monto_usd if p.es_devolucion else p.monto_usd
+                -float(p.monto_usd) if p.es_devolucion else float(p.monto_usd)
                 for p in estadia.pagos
             )
 
@@ -119,10 +117,12 @@ class DialogoDetallesHabitacion:
                 lineas_pendientes, tasa, total_pendiente
             )
 
-            # ── Tab de historial ────────────────────────────────────────────
-            tab_historial = self._construir_tab_historial(
-                estadia.transacciones, tasa
+            # ── Tab de historial ─────────────────────────────────────────
+            movimientos = sorted(
+                estadia.ledger_movimientos,
+                key=lambda m: m.creado_en, reverse=True,
             )
+            tab_historial = self._construir_tab_historial(movimientos, tasa)
 
             # ── Tabs ────────────────────────────────────────────────────────
             tabs = ft.Tabs(
@@ -135,7 +135,7 @@ class DialogoDetallesHabitacion:
                         content=ft.Container(content=tab_pendientes, padding=8),
                     ),
                     ft.Tab(
-                        text=f"Historial ({len(estadia.transacciones)})",
+                        text=f"Historial ({len(movimientos)})",
                         icon=ft.Icons.HISTORY,
                         content=ft.Container(content=tab_historial, padding=8),
                     ),
@@ -202,6 +202,7 @@ class DialogoDetallesHabitacion:
                         icon=ft.Icons.EXIT_TO_APP,
                         bgcolor="red", color="white",
                         on_click=lambda _: self.al_solicitar_checkout(self.habitacion),
+                        disabled=total_pendiente > 0.01,
                     ),
                 ],
                 actions_alignment=ft.MainAxisAlignment.END,
@@ -355,7 +356,7 @@ class DialogoDetallesHabitacion:
             ft.Column(controls=filas, spacing=5, scroll=ft.ScrollMode.AUTO),
         ], spacing=4, expand=True)
 
-    def _fila_pendiente(self, linea: LineaCuenta, tasa: float) -> ft.Container:
+    def _fila_pendiente(self, linea: FolioLinea, tasa: float) -> ft.Container:
         """Una fila con checkbox para las líneas pendientes de cobro."""
         TIPO_CFG = {
             TipoLinea.HOSPEDAJE:       (ft.Icons.BED_OUTLINED,     ft.Colors.BLUE_700,   "Hospedaje"),
@@ -371,7 +372,7 @@ class DialogoDetallesHabitacion:
             value=True,
             on_change=lambda _: self._actualizar_total_seleccionado(),
         )
-        self._checkboxes[linea.id] = (cb, linea.monto_usd)
+        self._checkboxes[linea.id] = (cb, float(linea.total_usd))
 
         return ft.Container(
             content=ft.Row([
@@ -393,10 +394,10 @@ class DialogoDetallesHabitacion:
                     ], spacing=6),
                 ], spacing=2, expand=True),
                 ft.Column([
-                    ft.Text(f"${linea.monto_usd:.2f}", size=13,
+                    ft.Text(f"${float(linea.total_usd):.2f}", size=13,
                             weight="bold", color=ft.Colors.RED_700,
                             text_align=ft.TextAlign.RIGHT),
-                    ft.Text(f"Bs.{a_bs(linea.monto_usd, tasa):,.0f}",
+                    ft.Text(f"Bs.{a_bs(float(linea.total_usd), tasa):,.0f}",
                             size=9, color=ft.Colors.GREY_400,
                             text_align=ft.TextAlign.RIGHT),
                 ], spacing=1, horizontal_alignment=ft.CrossAxisAlignment.END),
@@ -408,128 +409,87 @@ class DialogoDetallesHabitacion:
         )
 
     # ═══════════════════════════════════════════════════════════════════════
-    # TAB 2 — HISTORIAL (agrupado por TransaccionCobro)
+    # TAB 2 — HISTORIAL (timeline de LedgerMovimiento)
     # ═══════════════════════════════════════════════════════════════════════
 
     def _construir_tab_historial(
-        self, transacciones: list, tasa: float
+        self, movimientos: list, tasa: float
     ) -> ft.Column:
-
-        if not transacciones:
+        """
+        Muestra el historial contable como una línea de tiempo de asientos.
+        Cada LedgerMovimiento es una fila (CARGO, PAGO, DEVOLUCION, AJUSTE).
+        """
+        if not movimientos:
             return ft.Column([
                 ft.Container(
                     content=ft.Text(
-                        "Aún no se han registrado cobros.",
+                        "Aún no se han registrado movimientos contables.",
                         size=12, italic=True, color=ft.Colors.GREY_400,
                     ),
                     padding=20,
                 )
             ])
 
-        # Ordenar del más reciente al más antiguo
-        txs = sorted(transacciones, key=lambda t: t.creado_en, reverse=True)
-        tiles = [self._tile_transaccion(i, tx, tasa)
-                 for i, tx in enumerate(txs, 1)]
+        CFG_TIPO = {
+            TipoMovimiento.CARGO:      (ft.Icons.ARROW_UPWARD,   ft.Colors.RED_700,    "CARGO"),
+            TipoMovimiento.PAGO:       (ft.Icons.ARROW_DOWNWARD, ft.Colors.GREEN_700,  "PAGO"),
+            TipoMovimiento.DEVOLUCION: (ft.Icons.UNDO,            ft.Colors.ORANGE_700, "VUELTO"),
+            TipoMovimiento.AJUSTE:     (ft.Icons.TUNE,            ft.Colors.BLUE_700,   "AJUSTE"),
+        }
 
-        return ft.Column(
-            controls=tiles,
-            spacing=6,
-            scroll=ft.ScrollMode.AUTO,
-        )
-
-    def _tile_transaccion(
-        self, numero: int, tx: TransaccionCobro, tasa: float
-    ) -> ft.ExpansionTile:
-        """ExpansionTile que representa un cobro completo o parcial."""
-
-        es_completo  = tx.saldo_pendiente <= 0.01
-        color_estado = ft.Colors.GREEN_700 if es_completo else ft.Colors.ORANGE_700
-        texto_estado = "PAGADO" if es_completo else f"PARCIAL (debe ${tx.saldo_pendiente:.2f})"
-        icono_estado = ft.Icons.CHECK_CIRCLE if es_completo else ft.Icons.TIMELAPSE
-
-        # Cabecera del tile
-        titulo = ft.Row([
-            ft.Icon(icono_estado, color=color_estado, size=16),
-            ft.Column([
-                ft.Text(
-                    f"Factura #{numero}  —  {tx.creado_en.strftime('%d/%m/%Y %H:%M')}",
-                    size=12, weight="bold",
-                ),
-                ft.Row([
-                    ft.Text(f"Cobrado: ${tx.total_pagado:.2f}", size=11,
-                            color=ft.Colors.GREEN_700),
-                    ft.Text(" · ", size=11, color=ft.Colors.GREY_400),
-                    ft.Text(
-                        f"Pendiente: ${tx.saldo_pendiente:.2f}",
-                        size=11,
-                        color=ft.Colors.ORANGE_700 if tx.saldo_pendiente > 0.01
-                        else ft.Colors.GREY_400,
-                    ),
-                ], spacing=2),
-            ], spacing=2, expand=True),
-            ft.Container(
-                content=ft.Text(texto_estado, size=9, weight="bold",
-                                color=ft.Colors.WHITE),
-                bgcolor=color_estado,
-                padding=ft.padding.symmetric(horizontal=7, vertical=3),
-                border_radius=8,
-            ),
-        ], spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER)
-
-        # Líneas incluidas en esta transacción
-        lineas_tx = [l for l in tx.lineas
-                     if l.tipo != TipoLinea.SALDO_PENDIENTE or not l.cancelada]
-
-        filas_lineas = []
-        for linea in lineas_tx:
-            TIPO_CFG = {
-                TipoLinea.HOSPEDAJE:       (ft.Icons.BED_OUTLINED,    ft.Colors.BLUE_700,   "Hospedaje"),
-                TipoLinea.CARGO_EXTRA:     (ft.Icons.ROOM_SERVICE,    ft.Colors.ORANGE_700, "Servicio"),
-                TipoLinea.SALDO_PENDIENTE: (ft.Icons.PENDING_ACTIONS, ft.Colors.RED_700,    "Deuda"),
-            }
-            icono, color, etiq = TIPO_CFG.get(
-                linea.tipo, (ft.Icons.CIRCLE, ft.Colors.GREY_500, "")
+        filas = []
+        for mov in movimientos:
+            icono, color, etiq = CFG_TIPO.get(
+                mov.tipo, (ft.Icons.CIRCLE, ft.Colors.GREY_500, "")
             )
-            cancelada = linea.cancelada
+            monto = float(mov.debe_usd) if float(mov.debe_usd) > 0 else float(mov.haber_usd)
+            es_cargo = float(mov.debe_usd) > 0
 
-            filas_lineas.append(ft.Container(
+            filas.append(ft.Container(
                 content=ft.Row([
-                    ft.Icon(icono, size=13, color=color
-                            if cancelada else ft.Colors.ORANGE_700),
-                    ft.Text(linea.concepto, size=11, expand=True,
-                            color=ft.Colors.GREY_600 if cancelada
-                            else ft.Colors.BLACK87),
-                    ft.Icon(
-                        ft.Icons.CHECK if cancelada else ft.Icons.PENDING,
-                        size=12,
-                        color=ft.Colors.GREEN_600 if cancelada
-                        else ft.Colors.ORANGE_700,
+                    ft.Container(
+                        content=ft.Icon(icono, size=13, color=ft.Colors.WHITE),
+                        bgcolor=color, border_radius=20,
+                        width=24, height=24,
+                        alignment=ft.alignment.center,
                     ),
-                    ft.Text(
-                        f"${linea.monto_usd:.2f}",
-                        size=11, weight="bold",
-                        color=ft.Colors.GREY_500 if cancelada
-                        else ft.Colors.RED_700,
-                        text_align=ft.TextAlign.RIGHT,
+                    ft.Column([
+                        ft.Text(mov.concepto, size=11, weight="bold",
+                                color=ft.Colors.BLACK87),
+                        ft.Text(
+                            mov.creado_en.strftime("%d/%m/%Y %H:%M"),
+                            size=9, color=ft.Colors.GREY_500,
+                        ),
+                    ], spacing=1, expand=True),
+                    ft.Container(
+                        content=ft.Text(etiq, size=8, weight="bold",
+                                        color=ft.Colors.WHITE),
+                        bgcolor=color,
+                        padding=ft.padding.symmetric(horizontal=5, vertical=2),
+                        border_radius=4,
                     ),
-                ], spacing=6),
-                padding=ft.padding.symmetric(horizontal=12, vertical=5),
-                bgcolor=ft.Colors.GREY_50 if cancelada else ft.Colors.ORANGE_50,
-                border_radius=6,
+                    ft.Column([
+                        ft.Text(
+                            f"{'−' if not es_cargo else '+'}${monto:.2f}",
+                            size=12, weight="bold",
+                            color=ft.Colors.GREEN_700 if not es_cargo
+                                  else ft.Colors.RED_700,
+                            text_align=ft.TextAlign.RIGHT,
+                        ),
+                        ft.Text(
+                            f"Bs.{a_bs(monto, tasa):,.0f}",
+                            size=9, color=ft.Colors.GREY_400,
+                            text_align=ft.TextAlign.RIGHT,
+                        ),
+                    ], spacing=0, horizontal_alignment=ft.CrossAxisAlignment.END),
+                ], spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                bgcolor=ft.Colors.with_opacity(0.04, color),
+                padding=ft.padding.symmetric(horizontal=10, vertical=7),
+                border_radius=8,
+                border=ft.border.all(1, ft.Colors.with_opacity(0.15, color)),
             ))
 
-        return ft.ExpansionTile(
-            title=titulo,
-            initially_expanded=False,
-            bgcolor=ft.Colors.WHITE,
-            collapsed_bgcolor=ft.Colors.WHITE,
-            controls=[
-                ft.Container(
-                    content=ft.Column(controls=filas_lineas, spacing=4),
-                    padding=ft.padding.only(left=16, right=8, bottom=8),
-                )
-            ],
-        )
+        return ft.Column(controls=filas, spacing=5, scroll=ft.ScrollMode.AUTO)
 
     # ═══════════════════════════════════════════════════════════════════════
     # LÓGICA DE SELECCIÓN
@@ -615,33 +575,27 @@ class DialogoDetallesHabitacion:
                     nueva_salida  = estadia_bd.salida + timedelta(days=dias)
                     estadia_bd.salida = nueva_salida
 
-                    config     = leer_config_financiera(sesion)
-                    precio_n   = (
+                    config   = leer_config_financiera(sesion)
+                    precio_n = (
                         habitacion_bd.precio_actual_usd
                         or habitacion_bd.precio_base_usd
                     )
-                    # Mismo cálculo que el check-in: precio base + IVA
-                    from decimal import Decimal, ROUND_HALF_UP
-                    _D = lambda x: Decimal(str(x))
-                    monto_base  = dias * precio_n
-                    factor_iva  = config.porcentaje_iva / 100
-                    monto_total = float(
-                        (_D(monto_base) * (1 + _D(factor_iva)))
-                        .quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
-                    )
-
-                    sesion.add(LineaCuenta(
-                        estadia_id = estadia_bd.id,
-                        tipo       = TipoLinea.HOSPEDAJE,
-                        concepto   = (
+                    from modules.finance.engine import folio as folio_engine
+                    linea = folio_engine.crear_linea_hospedaje(
+                        sesion,
+                        estadia_id        = estadia_bd.id,
+                        habitacion_numero = habitacion_bd.numero,
+                        noches            = dias,
+                        precio_noche_usd  = precio_n,
+                        config            = config,
+                        concepto_extra    = (
                             f"Renovación — Hab. {habitacion_bd.numero} "
                             f"({dias} noche{'s' if dias > 1 else ''}) "
                             f"{nueva_entrada.strftime('%d/%m/%Y')} → "
                             f"{nueva_salida.strftime('%d/%m/%Y')}"
                         ),
-                        monto_usd  = monto_total,
-                        cancelada  = False,
-                    ))
+                    )
+                    monto_total = float(linea.total_usd)
                     sesion.commit()
                     self.pagina.close(modal_renovacion)
                     self.refrescar_detalles()

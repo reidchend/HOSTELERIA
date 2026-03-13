@@ -10,7 +10,7 @@ Uso:
 from database.connection import motor, Base
 from database.models import (
     Usuario, Habitacion, Configuracion, RolUsuario, EstadoHabitacion,
-    Caja, Pago, CargoExtra, Huesped, Estadia, Turno
+    Caja, Pago, Huesped, Estadia, Turno
 )
 from sqlalchemy.orm import sessionmaker
 from utils.helpers import hashear_contrasena

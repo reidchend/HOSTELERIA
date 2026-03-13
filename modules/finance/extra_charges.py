@@ -1,12 +1,10 @@
 # modules/finance/extra_charges.py
 
-from datetime import datetime
-from logging import config
-
 import flet as ft
 from database.connection import SesionLocal
-from database.models import CargoExtra, Estadia, LineaCuenta, TipoLinea, Pago, MetodoPago
-from utils.calculos_financieros import a_bs
+from database.models import Estadia
+from modules.finance.engine import folio as folio_engine
+from utils.calculos_financieros import leer_config_financiera
 
 
 class DialogoCargoExtra:
@@ -36,17 +34,7 @@ class DialogoCargoExtra:
             keyboard_type=ft.KeyboardType.NUMBER,
         )
 
-        saldo_disponible = getattr(estadia, "deposito_usd", 0.0)
-        self.texto_saldo = ft.Text(
-            f"Saldo a favor: ${saldo_disponible:.2f}",
-            color=ft.Colors.GREEN_700 if saldo_disponible > 0 else ft.Colors.RED_400,
-            weight="bold",
-        )
-        self.interruptor_saldo = ft.Switch(
-            label="Saldar directamente con saldo a favor",
-            value=False,
-            disabled=saldo_disponible <= 0,
-        )
+        # Saldo a favor se gestiona en el Check-Out; no en cargos extras
 
     def guardar_cargo(self, evento):
         sesion = SesionLocal()
@@ -58,63 +46,19 @@ class DialogoCargoExtra:
                 self.campo_monto.update()
                 return
 
-            # El recepcionista ingresa el monto final ya con IVA incluido.
-            # No se aplica ningún cálculo adicional.
-            monto_total = round(cantidad * precio_u, 2)
-            monto_base  = monto_total  # se guarda el mismo valor en CargoExtra
-
-
             nombre_concepto = self.campo_servicio.value.strip() or "Consumo"
-            if self.interruptor_saldo.value:
-                nombre_concepto += " (Saldado con saldo a favor)"
+            config = leer_config_financiera(sesion)
 
-            # 1. CargoExtra (compatibilidad con el modelo existente)
-            nuevo_cargo = CargoExtra(
-                estadia_id      = self.estadia.id,
-                nombre_servicio = nombre_concepto,
-                monto_usd       = monto_base,
-                cantidad        = cantidad,
+            # FolioEngine crea la línea y registra el CARGO en el ledger
+            from decimal import Decimal
+            linea = folio_engine.crear_cargo_extra(
+                sesion,
+                estadia_id          = self.estadia.id,
+                concepto            = nombre_concepto,
+                cantidad            = cantidad,
+                precio_unitario_usd = Decimal(str(precio_u)),
+                config              = config,
             )
-            sesion.add(nuevo_cargo)
-            sesion.flush()   # obtener ID para asociarlo a la línea si se cancela ya
-
-            # 2. LineaCuenta para el historial de cuenta abierta
-            cancelada_ya = False
-            if self.interruptor_saldo.value:
-                estadia_bd = sesion.get(Estadia, self.estadia.id)
-                if estadia_bd.deposito_usd >= monto_total:
-                    estadia_bd.deposito_usd -= monto_total
-                    cancelada_ya = True
-                    # Registro contable: salida de saldo a favor
-                    sesion.add(Pago(
-                        estadia_id    = self.estadia.id,
-                        monto_usd     = monto_total,
-                        monto_bs      = a_bs(monto_total, config.tasa_cambio),
-                        tasa_cambio   = config.tasa_cambio,
-                        metodo        = MetodoPago.SALDO_FAVOR,
-                        referencia    = "—",
-                        descripcion   = f"Cargo saldado con saldo a favor: {nombre_concepto}",
-                        es_devolucion = False,
-                        creado_en     = datetime.now(),
-                    ))
-                else:
-                    self.pagina.open(ft.SnackBar(
-                        ft.Text("Saldo a favor insuficiente para cubrir el cargo"),
-                        bgcolor=ft.Colors.ORANGE_700,
-                    ))
-                    sesion.rollback()
-                    return
-
-            sesion.add(LineaCuenta(
-                estadia_id = self.estadia.id,
-                tipo       = TipoLinea.CARGO_EXTRA,
-                concepto   = (
-                    f"{nombre_concepto} x{cantidad}"
-                    if cantidad > 1 else nombre_concepto
-                ),
-                monto_usd  = monto_total,
-                cancelada  = cancelada_ya,
-            ))
 
             sesion.commit()
             self.pagina.close(self.dialogo)
@@ -135,10 +79,8 @@ class DialogoCargoExtra:
             title=ft.Text("Registrar Consumo Adicional"),
             content=ft.Column([
                 self.campo_servicio,
-                ft.Row([self.campo_cantidad, self.campo_monto, self.texto_saldo],
+                ft.Row([self.campo_cantidad, self.campo_monto],
                        spacing=10, alignment=ft.MainAxisAlignment.START),
-                ft.Divider(),
-                self.interruptor_saldo,
             ], tight=True, spacing=15),
             actions=[
                 ft.TextButton("Cancelar",

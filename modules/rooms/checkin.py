@@ -4,7 +4,8 @@ import flet as ft
 from datetime import datetime, timedelta
 from database.connection import SesionLocal
 from utils.calculos_financieros import leer_config_financiera
-from database.models import LineaCuenta, TipoLinea, Habitacion, EstadoHabitacion, Huesped, Estadia
+from database.models import Habitacion, EstadoHabitacion, Huesped, Estadia
+from modules.finance.engine import folio as folio_engine
 from modules.finance.payment_dialog import DialogoPago
 
 
@@ -290,48 +291,44 @@ class DialogoCheckIn:
                 entrada       = fecha_entrada,
                 salida        = fecha_salida,
                 activa        = True,
-                deposito_usd  = 0.0,
             )
             self.estadia_actual.huespedes = lista_huespedes
             sesion.add(self.estadia_actual)
             sesion.flush()  # obtener el ID de la estadía antes del commit
 
-            # 5. Crear la línea de cuenta inicial (hospedaje)
-            config      = leer_config_financiera(sesion)
-            factor_iva  = config.porcentaje_iva / 100
-            monto_base  = noches * precio_noche
-            from decimal import Decimal, ROUND_HALF_UP
-            _D = lambda x: Decimal(str(x))
-            monto_total = float((_D(monto_base) * (1 + _D(factor_iva))).quantize(
-                Decimal('0.01'), rounding=ROUND_HALF_UP
-            ))
-            sesion.add(LineaCuenta(
-                estadia_id = self.estadia_actual.id,
-                tipo       = TipoLinea.HOSPEDAJE,
-                concepto   = (
+            # 5. Crear la línea de hospedaje en el folio (genera cargo en el ledger)
+            config = leer_config_financiera(sesion)
+            linea_hosp = folio_engine.crear_linea_hospedaje(
+                sesion,
+                estadia_id        = self.estadia_actual.id,
+                habitacion_numero = habitacion_bd.numero,
+                noches            = noches,
+                precio_noche_usd  = habitacion_bd.precio_actual_usd or habitacion_bd.precio_base_usd,
+                config            = config,
+                concepto_extra    = (
                     f'Hospedaje — Hab. {habitacion_bd.numero} '
                     f'({noches} noche{"s" if noches > 1 else ""}) '
                     f'del {fecha_entrada.strftime("%d/%m/%Y")} '
                     f'al {fecha_salida.strftime("%d/%m/%Y")}'
                 ),
-                monto_usd  = monto_total,
-                cancelada  = False,
-            ))
+            )
+            monto_total = float(linea_hosp.total_usd)
 
             # 6. Si el titular tiene deuda de estadías anteriores (credito_usd < 0),
-            #    cargarla automáticamente como línea de saldo pendiente.
+            #    cargarla como línea de saldo pendiente en el folio.
+            from decimal import Decimal
             titular_bd_fresco = sesion.get(Huesped, titular.id)
-            if titular_bd_fresco and (titular_bd_fresco.credito_usd or 0.0) < -0.01:
-                deuda_anterior = abs(titular_bd_fresco.credito_usd)
-                sesion.add(LineaCuenta(
+            credito = Decimal(str(titular_bd_fresco.credito_usd or 0)) if titular_bd_fresco else Decimal("0")
+            if titular_bd_fresco and credito < Decimal("-0.01"):
+                deuda_anterior = abs(credito)
+                folio_engine.crear_saldo_pendiente(
+                    sesion,
                     estadia_id = self.estadia_actual.id,
-                    tipo       = TipoLinea.SALDO_PENDIENTE,
-                    concepto   = f"Deuda de estadías anteriores",
-                    monto_usd  = round(deuda_anterior, 2),
-                    cancelada  = False,
-                ))
-                # Limpiar la deuda del perfil (ahora está como línea de cuenta)
-                titular_bd_fresco.credito_usd = 0.0
+                    monto_usd  = deuda_anterior,
+                    concepto   = "Deuda de estadías anteriores",
+                    config     = config,
+                )
+                titular_bd_fresco.credito_usd = Decimal("0")
 
             sesion.commit()
             sesion.refresh(self.estadia_actual)
