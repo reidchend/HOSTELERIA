@@ -6,6 +6,8 @@ from database.connection import SesionLocal
 from utils.calculos_financieros import leer_config_financiera
 from database.models import Habitacion, EstadoHabitacion, Huesped, Estadia
 from modules.finance.engine import folio as folio_engine
+from modules.finance.bitacora import registrar as _bita
+from database.models import TipoEvento
 from modules.finance.payment_dialog import DialogoPago
 
 
@@ -162,8 +164,8 @@ class DialogoCheckIn:
                 self.dialogo.update()
 
             # ── Alerta de deuda pendiente ──────────────────────────────────
-            elif (huesped.credito_usd or 0.0) < -0.01:
-                deuda = abs(huesped.credito_usd)
+            elif float(huesped.credito_usd or 0) < -0.01:
+                deuda = abs(float(huesped.credito_usd))
                 self.pagina.open(ft.SnackBar(
                     ft.Text(
                         f"⚠ {huesped.nombre} tiene una deuda de ${deuda:.2f} "
@@ -330,6 +332,20 @@ class DialogoCheckIn:
                 )
                 titular_bd_fresco.credito_usd = Decimal("0")
 
+            # Registrar evento en bitácora
+            _bita(
+                sesion     = sesion,
+                pagina     = self.pagina,
+                tipo       = TipoEvento.CHECKIN,
+                habitacion = habitacion_bd.numero,
+                concepto   = (
+                    f"Check-In — {titular.nombre_completo} · "
+                    f"{noches} noche{'s' if noches > 1 else ''} · "
+                    f"Sal. {fecha_salida.strftime('%d/%m/%Y')}"
+                ),
+                monto_usd  = monto_total,
+            )
+
             sesion.commit()
             sesion.refresh(self.estadia_actual)
 
@@ -352,11 +368,26 @@ class DialogoCheckIn:
         """
         def ir_a_cobrar(evento):
             self.pagina.close(dialogo_confirmacion)
+            # Leer las FolioLineas pendientes de esta estadía recién creada
+            from database.connection import SesionLocal as _SL
+            from database.models import FolioLinea as _FL
+            _ses = _SL()
+            try:
+                _lineas = _ses.query(_FL).filter(
+                    _FL.estadia_id == self.estadia_actual.id,
+                    _FL.cancelada  == False,
+                ).all()
+                _ids   = [l.id for l in _lineas]
+                _total = sum(float(l.total_usd) for l in _lineas)
+            finally:
+                _ses.close()
+
             modulo_pago = DialogoPago(
                 self.pagina,
                 self.estadia_actual,
-                self.total_calculado,
-                al_completar=self.al_completar,
+                _total or self.total_calculado,
+                al_completar = self.al_completar,
+                lineas_ids   = _ids,
             )
             modulo_pago.mostrar()
 

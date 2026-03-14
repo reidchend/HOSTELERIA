@@ -4,6 +4,8 @@ import flet as ft
 from database.connection import SesionLocal
 from database.models import Estadia
 from modules.finance.engine import folio as folio_engine
+from modules.finance.bitacora import registrar as _bita
+from database.models import TipoEvento as _TE
 from utils.calculos_financieros import leer_config_financiera
 
 
@@ -58,6 +60,16 @@ class DialogoCargoExtra:
                 cantidad            = cantidad,
                 precio_unitario_usd = Decimal(str(precio_u)),
                 config              = config,
+            )
+
+            _bita(
+                sesion     = sesion,
+                pagina     = self.pagina,
+                tipo       = _TE.CARGO_EXTRA,
+                habitacion = str(self.estadia.id),
+                concepto   = f"Cargo extra — {nombre_concepto} x{cantidad}",
+                monto_usd  = float(linea.total_usd),
+                metodo_pago = "",
             )
 
             sesion.commit()

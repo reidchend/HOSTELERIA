@@ -13,6 +13,8 @@ from sqlalchemy.orm import selectinload
 from datetime import datetime
 from utils.calculos_financieros import leer_config_financiera, a_bs, a_usd
 from modules.finance.gestor_vuelto import GestorVuelto
+from modules.finance.bitacora import registrar as _bita
+from database.models import TipoEvento as _TE
 
 # ══════════════════════════════════════════════════════════════════════════════
 # CONFIGURACIÓN VISUAL POR MÉTODO DE PAGO
@@ -120,12 +122,12 @@ class DialogoPago:
         if not estadia_bd or not estadia_bd.huespedes:
             return 0.0
         titular = sesion.get(Huesped, estadia_bd.huespedes[0].id)
-        return round(titular.credito_usd or 0.0, 2) if titular else 0.0
+        return round(float(titular.credito_usd or 0), 2) if titular else 0.0
 
     def _leer_credito_huesped(self, sesion, huesped_id):
         """Devuelve el credito_usd de cualquier huésped por id."""
         h = sesion.get(Huesped, huesped_id)
-        return round(h.credito_usd or 0.0, 2) if h else 0.0
+        return round(float(h.credito_usd or 0), 2) if h else 0.0
 
     # ══════════════════════════════════════════════════════════════════════════
     # CARGA DE DATOS
@@ -600,7 +602,7 @@ class DialogoPago:
                     )
                 huespedes = q.order_by(Huesped.credito_usd.desc()).limit(30).all()
                 lista_col.controls = (
-                    [_fila_huesped(h, h.credito_usd) for h in huespedes]
+                    [_fila_huesped(h, float(h.credito_usd or 0)) for h in huespedes]
                     if huespedes
                     else [ft.Text("Sin huéspedes con saldo a favor.",
                                   size=12, color=ft.Colors.GREY_400, italic=True)]
@@ -1018,10 +1020,37 @@ class DialogoPago:
                 else:
                     if self._gestor_vuelto is None or not self._gestor_vuelto.es_valido():
                         raise Exception(
-                            "La distribución del vuelto está incompleta. "
-                            "Verifica que los montos sumen correctamente."
+                            "El monto a entregar excede el vuelto disponible. "
+                            "Reduce los montos."
                         )
-                    self._gestor_vuelto.aplicar(sesion, estadia_id=self.id_estadia)
+                    # Obtener titular para acreditar el remanente
+                    titular_id = None
+                    if estadia_bd and estadia_bd.huespedes:
+                        titular_id = estadia_bd.huespedes[0].id
+                    self._gestor_vuelto.aplicar(
+                        sesion,
+                        estadia_id = self.id_estadia,
+                        titular_id = titular_id,
+                    )
+
+            # Registrar en bitácora
+            hab_num = ""
+            if estadia_bd and estadia_bd.habitacion:
+                hab_num = estadia_bd.habitacion.numero
+            _bita(
+                sesion     = sesion,
+                pagina     = self.pagina,
+                tipo       = _TE.PAGO,
+                habitacion = hab_num,
+                concepto   = (
+                    f"Cobro ${self.total_a_pagar:.2f} — "
+                    f"{'Completo' if saldo_pendiente_tx <= 0.01 else f'Parcial, quedan ${saldo_pendiente_tx:.2f}'}"
+                ),
+                monto_usd  = total_pagado_usd,
+                monto_bs   = sum(p.get('monto_bs', 0) for p in self.pagos_sesion),
+                metodo_pago = ", ".join({p['metodo'].value for p in self.pagos_sesion}),
+                confirmado  = saldo_pendiente_tx <= 0.01,
+            )
 
             sesion.commit()
             self.pagina.close(self.dialogo)

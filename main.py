@@ -122,6 +122,52 @@ def principal(pagina: ft.Page):
             from modules.rooms.checkin import DialogoCheckIn
             DialogoCheckIn(pagina, habitacion, al_completar=refrescar_grid_y_tarjetas).mostrar()
 
+        elif habitacion.estado == EstadoHabitacion.CLEANING:
+            def marcar_libre(_):
+                from database.connection import SesionLocal
+                from database.models import Habitacion as _Hab
+                pagina.close(dlg_limpieza)
+                sesion = SesionLocal()
+                try:
+                    hab_bd = sesion.get(_Hab, habitacion.id)
+                    hab_bd.estado = EstadoHabitacion.FREE
+                    sesion.commit()
+                    refrescar_grid_y_tarjetas()
+                    pagina.open(ft.SnackBar(
+                        ft.Text(f"Hab. {habitacion.numero} marcada como DISPONIBLE"),
+                        bgcolor=ft.Colors.GREEN_700,
+                    ))
+                except Exception as err:
+                    sesion.rollback()
+                    pagina.open(ft.SnackBar(ft.Text(str(err)), bgcolor=ft.Colors.RED_700))
+                finally:
+                    sesion.close()
+
+            dlg_limpieza = ft.AlertDialog(
+                modal=True,
+                title=ft.Row([
+                    ft.Icon(ft.Icons.CLEANING_SERVICES, color=ft.Colors.CYAN_700),
+                    ft.Text(f"Hab. {habitacion.numero} — En Limpieza"),
+                ], spacing=8),
+                content=ft.Text(
+                    "¿La habitación ya está lista?\n"
+                    "Al confirmar pasará al estado DISPONIBLE.",
+                    size=13,
+                ),
+                actions=[
+                    ft.TextButton("Cancelar",
+                                  on_click=lambda _: pagina.close(dlg_limpieza)),
+                    ft.ElevatedButton(
+                        "Marcar como Disponible",
+                        icon=ft.Icons.CHECK_CIRCLE,
+                        bgcolor=ft.Colors.GREEN_700, color="white",
+                        on_click=marcar_libre,
+                    ),
+                ],
+                actions_alignment=ft.MainAxisAlignment.END,
+            )
+            pagina.open(dlg_limpieza)
+
         elif habitacion.estado == EstadoHabitacion.OCCUPIED:
             # Se pasa al_actualizar_grid para que el diálogo de detalles pueda
             # notificar al dashboard cuando cambia algo (renovación, cargo extra,
@@ -182,6 +228,12 @@ def principal(pagina: ft.Page):
         )
         _zona_contenido.update()
 
+    def _mostrar_bitacora():
+        """Inyecta la pantalla de bitácora del turno en la zona intercambiable."""
+        from modules.finance.pantalla_bitacora import PantallaBitacora
+        _zona_contenido.content = PantallaBitacora(pagina, estado_app)
+        _zona_contenido.update()
+
     def _mostrar_configuracion():
         """Inyecta la pantalla de gestión de caja en la zona intercambiable."""
         from modules.finance.cash_management import PantallaGestionCaja
@@ -226,6 +278,9 @@ def principal(pagina: ft.Page):
         """Callback tras la apertura exitosa del turno de caja."""
         estado_app["tasa_cambio"]  = tasa_final
         estado_app["vista_activa"] = "dashboard"
+        # Persistir usuario en session para que la bitácora lo lea
+        if estado_app.get("usuario_activo"):
+            pagina.session.set("usuario_activo", estado_app["usuario_activo"])
         # Primera y única construcción completa del layout de la app
         _construir_interfaz_app()
 
@@ -362,4 +417,4 @@ def principal(pagina: ft.Page):
 
 
 if __name__ == "__main__":
-    ft.app(target=principal, host="localhost", port=8550, view=ft.WEB_BROWSER)
+    ft.app(target=principal)

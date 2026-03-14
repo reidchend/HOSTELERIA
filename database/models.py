@@ -73,6 +73,22 @@ estadia_huespedes = Table(
 # MODELOS
 # ══════════════════════════════════════════════════════════════════════════════
 
+class TipoHabitacion(Base):
+    """
+    Catálogo de tipos de habitación con su precio base.
+    Cuando una habitación cambia de tipo, hereda automáticamente
+    precio_base_usd y precio_actual_usd de esta tabla.
+    """
+    __tablename__ = "room_types"
+
+    id                = Column(Integer, primary_key=True)
+    nombre            = Column(String(50), unique=True, nullable=False)
+    precio_base_usd   = Column(Numeric(12, 4), nullable=False, default=0)
+    precio_actual_usd = Column(Numeric(12, 4), nullable=False, default=0)
+    capacidad_default = Column(Integer, default=2)
+    descripcion       = Column(String(200), nullable=True)
+
+
 class Huesped(Base):
     __tablename__ = "guests"
 
@@ -251,6 +267,54 @@ class Configuracion(Base):
     actualizado_en = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
 
+class TipoEvento(enum.Enum):
+    """Categoría de un evento en la bitácora del turno."""
+    CHECKIN      = "checkin"
+    CHECKOUT     = "checkout"
+    PAGO         = "pago"
+    CARGO_EXTRA  = "cargo_extra"
+    VUELTO       = "vuelto"
+    RENOVACION   = "renovacion"
+    RESERVACION  = "reservacion"
+    CAJA         = "caja"           # apertura, cierre, aporte
+    NOTA         = "nota"           # mensaje libre del recepcionista
+    SISTEMA      = "sistema"        # eventos internos
+
+
+class BitacoraEvento(Base):
+    """
+    Registro cronológico de todo lo que ocurre durante un turno.
+    Equivale al chat de WhatsApp pero dentro del sistema.
+
+    turno_id       → turno al que pertenece el evento
+    tipo           → categoría (CHECKIN, PAGO, VUELTO, etc.)
+    habitacion     → número de habitación (ej: "26" o "5/6" para múltiples)
+    concepto       → descripción legible del evento
+    monto_usd      → monto en USD (0 si no aplica)
+    monto_bs       → monto en Bs  (0 si no aplica)
+    metodo_pago    → método si fue un cobro/vuelto
+    referencia     → nro. de confirmación / ref de transferencia
+    recepcionista  → nombre de quien registró el evento
+    confirmado     → True = confirmado, False = pendiente de confirmar
+    """
+    __tablename__ = "bitacora"
+
+    id             = Column(Integer, primary_key=True)
+    turno_id       = Column(Integer, ForeignKey("shifts.id"), nullable=False)
+    tipo           = Column(Enum(TipoEvento), nullable=False)
+    habitacion     = Column(String(20),  default="")
+    concepto       = Column(String(400), nullable=False)
+    monto_usd      = Column(Numeric(12, 4), default=0)
+    monto_bs       = Column(Numeric(12, 4), default=0)
+    metodo_pago    = Column(String(50),  default="")
+    referencia     = Column(String(100), default="")
+    recepcionista  = Column(String(100), default="")
+    confirmado     = Column(Boolean, default=True)
+    creado_en      = Column(DateTime, default=datetime.now)
+
+    turno = relationship("Turno", back_populates="eventos")
+
+
 class Turno(Base):
     __tablename__ = "shifts"
 
@@ -267,4 +331,6 @@ class Turno(Base):
     bs_real      = Column(Numeric(12, 4), nullable=True)
     activo       = Column(Boolean, default=True)
 
-    usuario = relationship("Usuario")
+    usuario  = relationship("Usuario")
+    eventos  = relationship("BitacoraEvento", back_populates="turno",
+                             order_by="BitacoraEvento.creado_en", lazy="dynamic")

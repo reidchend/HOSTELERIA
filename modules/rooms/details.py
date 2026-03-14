@@ -10,6 +10,8 @@ from database.models import (
 )
 from utils.calculos_financieros import leer_config_financiera, a_bs
 from modules.finance.engine import folio as folio_engine
+from modules.finance.bitacora import registrar as _bita
+from database.models import TipoEvento as _TE
 from modules.finance.engine import ledger as led
 
 
@@ -202,7 +204,6 @@ class DialogoDetallesHabitacion:
                         icon=ft.Icons.EXIT_TO_APP,
                         bgcolor="red", color="white",
                         on_click=lambda _: self.al_solicitar_checkout(self.habitacion),
-                        disabled=total_pendiente > 0.01,
                     ),
                 ],
                 actions_alignment=ft.MainAxisAlignment.END,
@@ -596,6 +597,18 @@ class DialogoDetallesHabitacion:
                         ),
                     )
                     monto_total = float(linea.total_usd)
+                    _bita(
+                        sesion     = sesion,
+                        pagina     = self.pagina,
+                        tipo       = _TE.RENOVACION,
+                        habitacion = habitacion_bd.numero,
+                        concepto   = (
+                            f"Renovación {dias} noche{'s' if dias != 1 else ''} · "
+                            f"{nueva_entrada.strftime('%d/%m/%Y')} → {nueva_salida.strftime('%d/%m/%Y')}"
+                        ),
+                        monto_usd  = monto_total,
+                        confirmado = False,
+                    )
                     sesion.commit()
                     self.pagina.close(modal_renovacion)
                     self.refrescar_detalles()

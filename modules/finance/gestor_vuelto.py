@@ -2,6 +2,11 @@
 #
 # Componente reutilizable para gestionar la entrega de vueltos / devoluciones.
 #
+# LÓGICA FLEXIBLE:
+#   El recepcionista puede entregar UNA PARTE del vuelto (lo que tenga en caja).
+#   El remanente (monto_usd - total_entregado) queda automáticamente como
+#   saldo a favor (crédito) en el perfil del huésped titular.
+#
 # FUENTES DE VUELTO:
 #   Cajas físicas  → Caja Principal USD  /  Caja Chica USD
 #                    Caja Principal Bs   /  Caja Chica Bs
@@ -12,14 +17,12 @@
 #   gestor = GestorVuelto(monto_usd=15.00, tasa=36.5, pagina=pagina)
 #   widget = gestor.construir()   # ft.Container listo para embeber inline
 #
-#   # antes del commit:
-#   if not gestor.es_valido():
-#       raise Exception("Distribución del vuelto incompleta")
-#   gestor.aplicar(sesion, estadia_id=estadia.id)
+#   # antes del commit (siempre válido — puede entregar $0 y todo queda como crédito):
+#   credito_generado = gestor.aplicar(sesion, estadia_id=estadia.id, titular_id=huesped.id)
 
 import flet as ft
 from datetime import datetime
-from database.models import Pago, Caja, MetodoPago
+from database.models import Pago, Caja, MetodoPago, Huesped
 from utils.calculos_financieros import a_bs, a_usd
 from modules.finance.engine import ledger as led
 
@@ -122,22 +125,33 @@ class GestorVuelto:
         bs_admin    = self._leer(self._f_pm_bs)    + self._leer(self._f_transf_bs)
         return round(usd_fisico + a_usd(bs_fisico + bs_admin, self.tasa), 2)
 
+    def credito_remanente(self) -> float:
+        """Monto que NO se entrega físicamente y queda como crédito al huésped."""
+        return round(max(0.0, self.monto_usd - self.total_configurado_usd()), 2)
+
     def es_valido(self) -> bool:
-        diff = abs(self.monto_usd - self.total_configurado_usd())
-        return diff < 0.02
+        """
+        Siempre True mientras el total entregado no EXCEDA el monto a devolver.
+        El recepcionista puede entregar menos — el remanente va a crédito.
+        """
+        return self.total_configurado_usd() <= self.monto_usd + 0.02
 
     def _validar_en_vivo(self, _):
-        total = self.total_configurado_usd()
-        diff  = round(self.monto_usd - total, 2)
-        if abs(diff) < 0.02:
-            self._txt_estado.value = "✓ Distribución correcta"
-            self._txt_estado.color = ft.Colors.GREEN_700
-        elif diff > 0:
-            self._txt_estado.value = f"Falta distribuir: ${diff:.2f}  ·  Bs. {a_bs(diff, self.tasa):,.2f}"
+        total     = self.total_configurado_usd()
+        remanente = round(self.monto_usd - total, 2)
+        if total > self.monto_usd + 0.02:
+            # Único caso inválido: el recepcionista puso más de lo que debe devolver
+            self._txt_estado.value = f"⚠ Excede en ${total - self.monto_usd:.2f} — reduce los montos"
             self._txt_estado.color = ft.Colors.RED_700
+        elif remanente < 0.02:
+            self._txt_estado.value = "✓ Vuelto completo — se entrega todo en efectivo/transferencia"
+            self._txt_estado.color = ft.Colors.GREEN_700
         else:
-            self._txt_estado.value = f"Excede en ${abs(diff):.2f} — ajusta los montos"
-            self._txt_estado.color = ft.Colors.ORANGE_700
+            self._txt_estado.value = (
+                f"ℹ ${remanente:.2f} quedará como saldo a favor del huésped  "
+"                "f"·  Bs. {a_bs(remanente, self.tasa):,.2f}"
+            )
+            self._txt_estado.color = ft.Colors.BLUE_700
         try:
             self._txt_estado.update()
         except Exception:
@@ -171,11 +185,17 @@ class GestorVuelto:
                 # Encabezado
                 ft.Row([
                     ft.Icon(ft.Icons.CURRENCY_EXCHANGE, color=ft.Colors.ORANGE_700, size=16),
-                    ft.Text(
-                        f"Distribución del vuelto: ${self.monto_usd:.2f}  ·  "
-                        f"Bs. {a_bs(self.monto_usd, self.tasa):,.2f}",
-                        weight="bold", color=ft.Colors.ORANGE_700, size=13,
-                    ),
+                    ft.Column([
+                        ft.Text(
+                            f"Vuelto a gestionar: ${self.monto_usd:.2f}  ·  "
+"                            "f"Bs. {a_bs(self.monto_usd, self.tasa):,.2f}",
+                            weight="bold", color=ft.Colors.ORANGE_700, size=13,
+                        ),
+                        ft.Text(
+                            "Puedes entregar menos — el resto queda como crédito al huésped.",
+                            size=10, color=ft.Colors.ORANGE_400, italic=True,
+                        ),
+                    ], spacing=2),
                 ], spacing=6),
 
                 # Sección cajas físicas
@@ -223,17 +243,19 @@ class GestorVuelto:
     # APLICACIÓN EN BASE DE DATOS
     # ════════════════════════════════════════════════════════════════════
 
-    def aplicar(self, sesion, estadia_id: int) -> None:
+    def aplicar(self, sesion, estadia_id: int, titular_id: int = None) -> float:
         """
-        Registra los Pago(es_devolucion=True) correspondientes y descuenta
-        de las cajas físicas. Debe llamarse dentro de una transacción abierta.
-        Lanza Exception si los fondos son insuficientes.
+        Registra los vueltos físicos/electrónicos configurados y descuenta
+        de las cajas. El remanente (monto no entregado) se acredita en
+        Huesped.credito_usd del titular si se proporciona titular_id.
+
+        Devuelve el monto acreditado como crédito (0.0 si se entregó todo).
+        Lanza Exception si los fondos son insuficientes o si se excede el monto.
         """
         if not self.es_valido():
             raise Exception(
-                f"La distribución del vuelto no cuadra. "
-                f"Total configurado: ${self.total_configurado_usd():.2f} "
-                f"/ Requerido: ${self.monto_usd:.2f}"
+                f"El total a entregar (${self.total_configurado_usd():.2f}) excede "
+"                "f"el vuelto disponible (${self.monto_usd:.2f}). Ajusta los montos."
             )
 
         caja  = sesion.query(Caja).first()
@@ -355,3 +377,23 @@ class GestorVuelto:
                 referencia = desc,
                 pago_id    = nuevo_pago.id,
             )
+
+        # ── Remanente → crédito al huésped titular ───────────────────────
+        remanente = self.credito_remanente()
+        if remanente > 0.01 and titular_id:
+            titular = sesion.get(Huesped, titular_id)
+            if titular:
+                titular.credito_usd = (
+                    _D(str(titular.credito_usd or 0)) + _D(str(remanente))
+                )
+                # Asentar en ledger como devolución pendiente (crédito)
+                led.registrar_devolucion(
+                    sesion,
+                    estadia_id = estadia_id,
+                    concepto   = f"Saldo a favor por vuelto parcial — ${remanente:.2f} acreditados al huésped",
+                    monto_usd  = _D(str(remanente)),
+                    tasa       = _D(str(tasa)),
+                    referencia = "Crédito huésped",
+                )
+
+        return remanente

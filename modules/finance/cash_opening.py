@@ -3,7 +3,8 @@
 import flet as ft
 from datetime import datetime
 from database.connection import SesionLocal
-from database.models import Caja, Configuracion, Turno
+from database.models import Caja, Configuracion, Turno, TipoEvento
+from modules.finance.bitacora import registrar as _bita
 
 
 class DialogoAperturaTurno:
@@ -95,6 +96,19 @@ class DialogoAperturaTurno:
                 caja_bd.caja_chica_usd       = usd_fisico
                 caja_bd.caja_chica_bs        = bs_fisico
                 caja_bd.ultima_actualizacion = datetime.now()
+
+            _bita(
+                sesion     = sesion,
+                pagina     = self.pagina,
+                tipo       = TipoEvento.CAJA,
+                concepto   = (
+                    f"Apertura de turno — Caja chica: ${usd_fisico:.2f} / "
+                    f"Bs. {bs_fisico:,.2f} · Tasa: {tasa_ingresada:.2f}"
+                ),
+                monto_usd  = usd_fisico,
+                monto_bs   = bs_fisico,
+                recepcionista = self.usuario.get('nombre_completo', ''),
+            )
 
             sesion.commit()
 

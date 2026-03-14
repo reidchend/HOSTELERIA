@@ -757,10 +757,17 @@ class CheckOutWizard:
                         )
 
             elif self._credito > 0.01 and self._decision == "vuelto":
-                # GestorVuelto valida fondos, registra Pagos y descuenta cajas
-                self._gestor_vuelto.aplicar(sesion, estadia_id=est_bd.id)
+                # Limpiar el crédito actual del titular antes de aplicar el gestor.
+                # gestor.aplicar() re-acreditará solo el remanente no entregado.
                 if titular_bd:
                     titular_bd.credito_usd = _D("0")
+                sesion.flush()
+                titular_id_co = titular_bd.id if titular_bd else None
+                self._gestor_vuelto.aplicar(
+                    sesion,
+                    estadia_id = est_bd.id,
+                    titular_id = titular_id_co,
+                )
                 # Si decision == 'credito': no tocar credito_usd
 
             # D. Cerrar estadía → habitación a LIMPIEZA
