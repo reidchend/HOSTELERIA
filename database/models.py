@@ -73,6 +73,48 @@ estadia_huespedes = Table(
 # MODELOS
 # ══════════════════════════════════════════════════════════════════════════════
 
+class EstadoReservacion(enum.Enum):
+    """Estado del ciclo de vida de una reservación."""
+    PENDIENTE   = "pendiente"    # recién creada, sin confirmar
+    CONFIRMADA  = "confirmada"   # confirmada por recepción
+    CONVERTIDA  = "convertida"   # se hizo check-in
+    CANCELADA   = "cancelada"    # cancelada
+
+
+class Reservacion(Base):
+    """
+    Reservación de habitación — puede venir del formulario web o crearse
+    directamente en el sistema.
+
+    No tiene habitacion_id — solo el tipo de habitación deseado.
+    Al hacer check-in se convierte y se le asigna una habitación concreta.
+    """
+    __tablename__ = "reservaciones"
+
+    id                = Column(Integer, primary_key=True)
+    # Datos del titular
+    nombre            = Column(String(50),  nullable=False)
+    apellido          = Column(String(50),  nullable=False)
+    documento         = Column(String(20),  nullable=True)
+    telefono          = Column(String(30),  nullable=True)
+    nacionalidad      = Column(String(50),  nullable=True)
+    email             = Column(String(100), nullable=True)
+    # Reservación
+    tipo_habitacion   = Column(String(50),  nullable=False)
+    fecha_entrada     = Column(Date,         nullable=False)
+    fecha_salida      = Column(Date,         nullable=False)
+    num_huespedes     = Column(Integer,      default=1)
+    notas             = Column(String(500),  nullable=True)
+    # Control
+    estado            = Column(Enum(EstadoReservacion),
+                               default=EstadoReservacion.PENDIENTE)
+    origen            = Column(String(20),   default="sistema")  # "sistema" | "web"
+    creado_en         = Column(DateTime,     default=datetime.now)
+    confirmado_en     = Column(DateTime,     nullable=True)
+    # Relación con la estadía resultante
+    estadia_id        = Column(Integer, ForeignKey("stays.id"), nullable=True)
+
+
 class TipoHabitacion(Base):
     """
     Catálogo de tipos de habitación con su precio base.
@@ -228,9 +270,39 @@ class Pago(Base):
     referencia    = Column(String(100))
     descripcion   = Column(String(200))
     es_devolucion = Column(Boolean, default=False)
+    confirmado    = Column(Boolean, default=True)   # False = pendiente de confirmar
     creado_en     = Column(DateTime, default=datetime.now)
 
     estadia = relationship("Estadia", back_populates="pagos")
+
+
+class EstadoCuenta(enum.Enum):
+    """Estado de una cuenta por pagar o por cobrar."""
+    PENDIENTE = "pendiente"
+    PAGADA    = "pagada"
+    ANULADA   = "anulada"
+
+
+class CuentaPagar(Base):
+    """
+    Deuda del hotel con un tercero (empleado OT, proveedor, vuelto pendiente).
+    Equivale a la sección CUENTAS POR PAGAR del cierre de turno de WhatsApp.
+    """
+    __tablename__ = "cuentas_pagar"
+
+    id            = Column(Integer, primary_key=True)
+    turno_id      = Column(Integer, ForeignKey("shifts.id"), nullable=False)
+    beneficiario  = Column(String(100), nullable=False)  # "Heriberto Loyo", "Hab38", etc.
+    concepto      = Column(String(200), nullable=False)
+    monto_usd     = Column(Numeric(12, 4), default=0)
+    monto_bs      = Column(Numeric(12, 4), default=0)
+    estado        = Column(Enum(EstadoCuenta), default=EstadoCuenta.PENDIENTE)
+    es_vuelto     = Column(Boolean, default=False)   # True = vuelto pendiente a huésped
+    habitacion    = Column(String(20), default="")
+    creado_en     = Column(DateTime, default=datetime.now)
+    saldado_en    = Column(DateTime, nullable=True)
+
+    turno = relationship("Turno", back_populates="cuentas_pagar")
 
 
 class Caja(Base):
@@ -331,6 +403,8 @@ class Turno(Base):
     bs_real      = Column(Numeric(12, 4), nullable=True)
     activo       = Column(Boolean, default=True)
 
-    usuario  = relationship("Usuario")
-    eventos  = relationship("BitacoraEvento", back_populates="turno",
-                             order_by="BitacoraEvento.creado_en", lazy="dynamic")
+    usuario       = relationship("Usuario")
+    eventos       = relationship("BitacoraEvento", back_populates="turno",
+                                  order_by="BitacoraEvento.creado_en", lazy="dynamic")
+    cuentas_pagar = relationship("CuentaPagar", back_populates="turno",
+                                  order_by="CuentaPagar.creado_en", lazy="selectin")

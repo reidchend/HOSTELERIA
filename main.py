@@ -69,6 +69,9 @@ def principal(pagina: ft.Page):
     # Zona intercambiable: única parte del layout que cambia entre vistas
     _zona_contenido = ft.Container(expand=True)
 
+    # Panel lateral de pendientes — se instancia después del login
+
+
     # Row de tarjetas de resumen — se actualiza reemplazando sus .controls
     _fila_tarjetas = ft.Row(
         alignment=ft.MainAxisAlignment.CENTER,
@@ -234,6 +237,20 @@ def principal(pagina: ft.Page):
         _zona_contenido.content = PantallaBitacora(pagina, estado_app)
         _zona_contenido.update()
 
+    def _mostrar_reservaciones():
+        """Inyecta la pantalla de reservaciones en la zona intercambiable."""
+        from modules.rooms.reservaciones import PantallaReservaciones
+        _zona_contenido.content = PantallaReservaciones(
+            pagina, estado_app,
+            al_actualizar=refrescar_grid_y_tarjetas,
+        )
+        _zona_contenido.update()
+
+    def _abrir_pendientes():
+        """Abre el modal de vueltos y deudas pendientes."""
+        from modules.finance.panel_pendientes import abrir_modal_pendientes
+        abrir_modal_pendientes(pagina, estado_app)
+
     def _mostrar_configuracion():
         """Inyecta la pantalla de gestión de caja en la zona intercambiable."""
         from modules.finance.cash_management import PantallaGestionCaja
@@ -271,6 +288,10 @@ def principal(pagina: ft.Page):
         if nombre_vista == "dashboard":
             actualizar_tarjetas_resumen()   # datos frescos al volver
             _mostrar_dashboard()
+        elif nombre_vista == "bitacora":
+            _mostrar_bitacora()
+        elif nombre_vista == "reservaciones":
+            _mostrar_reservaciones()
         else:
             _mostrar_configuracion()
 
@@ -320,6 +341,39 @@ def principal(pagina: ft.Page):
                 ]),
                 ft.Row([
                     _btn_nav,
+                    ft.ElevatedButton(
+                        "Bitácora",
+                        icon=ft.Icons.HISTORY,
+                        style=ft.ButtonStyle(
+                            bgcolor=ft.Colors.AMBER_50,
+                            color=ft.Colors.AMBER_900,
+                            shape=ft.RoundedRectangleBorder(radius=8),
+                            side=ft.BorderSide(1, ft.Colors.AMBER_300),
+                        ),
+                        on_click=lambda _: cambiar_vista("bitacora"),
+                    ),
+                    ft.ElevatedButton(
+                        "Pendientes",
+                        icon=ft.Icons.PENDING_ACTIONS,
+                        style=ft.ButtonStyle(
+                            bgcolor=ft.Colors.RED_50,
+                            color=ft.Colors.RED_800,
+                            shape=ft.RoundedRectangleBorder(radius=8),
+                            side=ft.BorderSide(1, ft.Colors.RED_300),
+                        ),
+                        on_click=lambda _: _abrir_pendientes(),
+                    ),
+                    ft.ElevatedButton(
+                        "Reservaciones",
+                        icon=ft.Icons.EVENT_AVAILABLE,
+                        style=ft.ButtonStyle(
+                            bgcolor=ft.Colors.GREEN_50,
+                            color=ft.Colors.GREEN_800,
+                            shape=ft.RoundedRectangleBorder(radius=8),
+                            side=ft.BorderSide(1, ft.Colors.GREEN_300),
+                        ),
+                        on_click=lambda _: cambiar_vista("reservaciones"),
+                    ),
                     ft.VerticalDivider(width=20),
                     ft.Container(
                         content=ft.Row([
@@ -384,7 +438,6 @@ def principal(pagina: ft.Page):
             ft.Container(content=_zona_contenido, expand=True),
         ], expand=True, spacing=0))
 
-        # Ahora que los widgets ya están en el árbol, poblar las tarjetas.
         actualizar_tarjetas_resumen()
         pagina.update()
 
@@ -417,4 +470,4 @@ def principal(pagina: ft.Page):
 
 
 if __name__ == "__main__":
-    ft.app(target=principal)
+    ft.app(target=principal, host="localhost", port=8550)
