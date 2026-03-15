@@ -8,7 +8,7 @@ from datetime import datetime, date, timedelta
 from decimal import Decimal
 from database.connection import SesionLocal
 from database.models import (
-    Reservacion, EstadoReservacion, TipoHabitacion,
+    Reservacion, EstadoReservacion, TipoHabitacion, Configuracion,
     Habitacion, EstadoHabitacion, Huesped, Estadia,
 )
 from modules.finance.bitacora import registrar as _bita
@@ -116,6 +116,31 @@ class PantallaReservaciones(ft.Container):
                     ),
                     on_click=lambda _: self._toggle_filtro(),
                 ),
+                ft.Row([
+                    ft.ElevatedButton(
+                        "Importar web ↓" if self._sheet_id_guardado() else "Configurar importación",
+                        icon=ft.Icons.CLOUD_DOWNLOAD if self._sheet_id_guardado() else ft.Icons.SETTINGS,
+                        style=ft.ButtonStyle(
+                            bgcolor=ft.Colors.PURPLE_50,
+                            color=ft.Colors.PURPLE_800,
+                            shape=ft.RoundedRectangleBorder(radius=8),
+                            side=ft.BorderSide(1, ft.Colors.PURPLE_300),
+                        ),
+                        on_click=lambda _: (
+                            self._importar_directo()
+                            if self._sheet_id_guardado()
+                            else self._dlg_importar()
+                        ),
+                    ),
+                    ft.IconButton(
+                        icon=ft.Icons.SETTINGS_OUTLINED,
+                        icon_color=ft.Colors.PURPLE_400,
+                        icon_size=18,
+                        tooltip="Reconfigurar Sheet ID y URL del Script",
+                        on_click=lambda _: self._dlg_importar(),
+                        visible=self._sheet_id_guardado(),
+                    ),
+                ], spacing=2),
                 ft.ElevatedButton(
                     "Nueva reservación",
                     icon=ft.Icons.ADD,
@@ -512,6 +537,160 @@ class PantallaReservaciones(ft.Container):
             reserva   = reserva,
             al_completar = self._refrescar,
         ).mostrar()
+
+    def _sheet_id_guardado(self) -> bool:
+        """Devuelve True si ya hay un Sheet ID guardado en la BD."""
+        from modules.rooms.importar_reservaciones import leer_config
+        sesion = SesionLocal()
+        try:
+            return bool(leer_config(sesion)["sheet_id"])
+        finally:
+            sesion.close()
+
+    def _importar_directo(self):
+        """Importa sin abrir diálogo — usa la config ya guardada."""
+        from modules.rooms.importar_reservaciones import importar, leer_config
+        sesion = SesionLocal()
+        cfg = leer_config(sesion)
+        sesion.close()
+
+        # Mostrar indicador
+        self.pagina.open(ft.SnackBar(
+            ft.Text("⏳ Importando desde Google Sheets..."),
+            bgcolor=ft.Colors.BLUE_700,
+        ))
+
+        res = importar(cfg["sheet_id"], cfg["script_url"])
+
+        if res["importadas"] == 0 and res["errores"] == 0:
+            msg = "ℹ No hay reservaciones nuevas."
+            color = ft.Colors.BLUE_GREY_600
+        elif res["errores"] == 0:
+            msg = f"✅ {res['importadas']} reservación(es) importada(s)."
+            color = ft.Colors.GREEN_700
+        else:
+            msg = (f"⚠ {res['importadas']} importada(s), "
+                   f"{res['errores']} error(es).")
+            color = ft.Colors.ORANGE_700
+
+        self.pagina.open(ft.SnackBar(ft.Text(msg), bgcolor=color))
+        self._refrescar()
+
+    def _dlg_importar(self):
+        """Diálogo para configurar la Sheet e importar reservaciones web."""
+        from modules.rooms.importar_reservaciones import importar, leer_config, guardar_config
+
+        sesion = SesionLocal()
+        cfg    = leer_config(sesion)
+        sesion.close()
+
+        tf_sheet = ft.TextField(
+            label="Google Sheet ID",
+            value=cfg["sheet_id"],
+            hint_text="El código largo en la URL de la Sheet",
+            expand=True,
+        )
+        tf_script = ft.TextField(
+            label="URL del Apps Script (opcional)",
+            value=cfg["script_url"],
+            hint_text="https://script.google.com/macros/s/.../exec",
+            expand=True,
+        )
+        txt_res = ft.Text("", size=12)
+
+        def ejecutar(_):
+            sid = tf_sheet.value.strip()
+            if not sid:
+                txt_res.value = "⚠ El Sheet ID es obligatorio."
+                txt_res.color = ft.Colors.ORANGE_700
+                txt_res.update(); return
+
+            # Guardar configuración
+            s2 = SesionLocal()
+            try:
+                guardar_config(s2, sid, tf_script.value.strip())
+                s2.commit()
+            finally:
+                s2.close()
+
+            txt_res.value = "⏳ Conectando con Google Sheets..."
+            txt_res.color = ft.Colors.BLUE_700
+            txt_res.update()
+
+            res = importar(sid, tf_script.value.strip())
+
+            if res["errores"] == 0:
+                txt_res.value = (
+                    f"✅ {res['importadas']} reservación(es) importada(s)."
+                    if res["importadas"] > 0
+                    else "ℹ No hay reservaciones nuevas por importar."
+                )
+                txt_res.color = ft.Colors.GREEN_700
+            else:
+                txt_res.value = (
+                    f"⚠ {res['importadas']} importada(s) · "
+                    f"{res['errores']} error(es): "
+                    + "; ".join(res["detalle_errores"][:3])
+                )
+                txt_res.color = ft.Colors.ORANGE_700
+            txt_res.update()
+            self._refrescar()
+
+        dlg = ft.AlertDialog(
+            modal=True,
+            title=ft.Row([
+                ft.Icon(ft.Icons.CLOUD_DOWNLOAD, color=ft.Colors.PURPLE_700),
+                ft.Text("Importar desde Google Sheets", size=15, weight="bold"),
+            ], spacing=8),
+            content=ft.Container(
+                width=500,
+                content=ft.Column([
+                    ft.Container(
+                        content=ft.Column([
+                            ft.Text("① Sheet ID", size=11, weight="bold",
+                                    color=ft.Colors.GREY_700),
+                            ft.Text(
+                                "Está en la URL de la hoja:\n"
+                                "docs.google.com/spreadsheets/d/ → ID ← /edit",
+                                size=11, color=ft.Colors.GREY_500,
+                            ),
+                            tf_sheet,
+                        ], spacing=6),
+                        bgcolor=ft.Colors.GREY_50, border_radius=8,
+                        padding=12,
+                        border=ft.border.all(1, ft.Colors.GREY_200),
+                    ),
+                    ft.Container(
+                        content=ft.Column([
+                            ft.Text("② URL del Apps Script (opcional)",
+                                    size=11, weight="bold", color=ft.Colors.GREY_700),
+                            ft.Text(
+                                "Si la configuras, las filas importadas se marcan "
+                                "automáticamente en la Sheet para no duplicar.",
+                                size=11, color=ft.Colors.GREY_500,
+                            ),
+                            tf_script,
+                        ], spacing=6),
+                        bgcolor=ft.Colors.GREY_50, border_radius=8,
+                        padding=12,
+                        border=ft.border.all(1, ft.Colors.GREY_200),
+                    ),
+                    txt_res,
+                ], spacing=12, tight=True),
+            ),
+            actions=[
+                ft.TextButton("Cerrar",
+                              on_click=lambda _: self.pagina.close(dlg)),
+                ft.ElevatedButton(
+                    "Importar ahora",
+                    icon=ft.Icons.DOWNLOAD,
+                    bgcolor=ft.Colors.PURPLE_700, color=ft.Colors.WHITE,
+                    on_click=ejecutar,
+                ),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        self.pagina.open(dlg)
 
     def _toggle_filtro(self):
         self._filtro = "todas" if self._filtro == "activas" else "activas"

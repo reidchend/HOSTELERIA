@@ -470,4 +470,4 @@ def principal(pagina: ft.Page):
 
 
 if __name__ == "__main__":
-    ft.app(target=principal, host="localhost", port=8550)
+    ft.app(target=principal)
