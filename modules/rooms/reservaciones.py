@@ -72,110 +72,94 @@ class PantallaReservaciones(ft.Container):
         reservas = self._cargar()
         tipos    = self._cargar_tipos()
 
-        # Resumen
-        total_pend = sum(1 for r in reservas
-                         if r.estado == EstadoReservacion.PENDIENTE)
-        total_conf = sum(1 for r in reservas
-                         if r.estado == EstadoReservacion.CONFIRMADA)
+        total_pend = sum(1 for r in reservas if r.estado == EstadoReservacion.PENDIENTE)
+        total_conf = sum(1 for r in reservas if r.estado == EstadoReservacion.CONFIRMADA)
+        sheet_ok   = self._sheet_id_guardado()
 
+        # ── Chips de resumen ──────────────────────────────────────────────────
         def chip(valor, label, color):
             return ft.Container(
-                content=ft.Column([
-                    ft.Text(str(valor), size=20, weight="bold", color=color),
-                    ft.Text(label, size=10, color=ft.Colors.GREY_500),
-                ], spacing=1, horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+                content=ft.Row([
+                    ft.Text(str(valor), size=16, weight="bold", color=color),
+                    ft.Text(label, size=11, color=ft.Colors.GREY_500),
+                ], spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER),
                 bgcolor=ft.Colors.WHITE,
-                border=ft.border.all(1.5, ft.Colors.with_opacity(0.3, color)),
-                border_radius=10,
-                padding=ft.padding.symmetric(horizontal=20, vertical=10),
+                border=ft.border.all(1, ft.Colors.with_opacity(0.25, color)),
+                border_radius=8,
+                padding=ft.padding.symmetric(horizontal=14, vertical=8),
             )
 
-        resumen = ft.Row([
-            chip(total_pend, "Pendientes",  ft.Colors.AMBER_700),
-            chip(total_conf, "Confirmadas", ft.Colors.BLUE_700),
-            chip(len(reservas), "Total visibles", ft.Colors.GREY_600),
-        ], spacing=10)
-
-        # Encabezado
-        encabezado = ft.Row([
-            ft.Column([
-                ft.Row([
-                    ft.Icon(ft.Icons.EVENT_AVAILABLE,
-                            color=ft.Colors.BLUE_700, size=20),
-                    ft.Text("Reservaciones", size=22, weight="bold",
-                            color=ft.Colors.BLUE_GREY_900),
-                ], spacing=8),
-            ], expand=True),
-            ft.Row([
-                ft.ElevatedButton(
-                    "Solo activas" if self._filtro == "todas" else "Ver todas",
-                    icon=ft.Icons.FILTER_LIST,
-                    style=ft.ButtonStyle(
-                        bgcolor=ft.Colors.GREY_100, color=ft.Colors.GREY_700,
-                        shape=ft.RoundedRectangleBorder(radius=8),
-                    ),
-                    on_click=lambda _: self._toggle_filtro(),
+        # ── Barra de herramientas ─────────────────────────────────────────────
+        toolbar = ft.Row([
+            ft.Icon(ft.Icons.EVENT_AVAILABLE, color=ft.Colors.BLUE_700, size=18),
+            ft.Text("Reservaciones", size=20, weight="bold",
+                    color=ft.Colors.BLUE_GREY_900),
+            chip(total_pend, "pendientes", ft.Colors.AMBER_700),
+            chip(total_conf, "confirmadas", ft.Colors.BLUE_700),
+            chip(len(reservas), "total", ft.Colors.GREY_500),
+            ft.Container(expand=True),
+            # Filtro
+            ft.TextButton(
+                "Ver todas" if self._filtro == "activas" else "Solo activas",
+                icon=ft.Icons.FILTER_LIST,
+                style=ft.ButtonStyle(color=ft.Colors.GREY_600),
+                on_click=lambda _: self._toggle_filtro(),
+            ),
+            # Importar
+            ft.ElevatedButton(
+                "Importar web" if sheet_ok else "Configurar Sheet",
+                icon=ft.Icons.CLOUD_DOWNLOAD if sheet_ok else ft.Icons.SETTINGS,
+                style=ft.ButtonStyle(
+                    bgcolor=ft.Colors.PURPLE_50,
+                    color=ft.Colors.PURPLE_800,
+                    shape=ft.RoundedRectangleBorder(radius=8),
+                    side=ft.BorderSide(1, ft.Colors.PURPLE_200),
                 ),
-                ft.Row([
-                    ft.ElevatedButton(
-                        "Importar web ↓" if self._sheet_id_guardado() else "Configurar importación",
-                        icon=ft.Icons.CLOUD_DOWNLOAD if self._sheet_id_guardado() else ft.Icons.SETTINGS,
-                        style=ft.ButtonStyle(
-                            bgcolor=ft.Colors.PURPLE_50,
-                            color=ft.Colors.PURPLE_800,
-                            shape=ft.RoundedRectangleBorder(radius=8),
-                            side=ft.BorderSide(1, ft.Colors.PURPLE_300),
-                        ),
-                        on_click=lambda _: (
-                            self._importar_directo()
-                            if self._sheet_id_guardado()
-                            else self._dlg_importar()
-                        ),
-                    ),
-                    ft.IconButton(
-                        icon=ft.Icons.SETTINGS_OUTLINED,
-                        icon_color=ft.Colors.PURPLE_400,
-                        icon_size=18,
-                        tooltip="Reconfigurar Sheet ID y URL del Script",
-                        on_click=lambda _: self._dlg_importar(),
-                        visible=self._sheet_id_guardado(),
-                    ),
-                ], spacing=2),
-                ft.ElevatedButton(
-                    "Nueva reservación",
-                    icon=ft.Icons.ADD,
-                    bgcolor=ft.Colors.BLUE_700, color=ft.Colors.WHITE,
-                    on_click=lambda _: self._dlg_nueva(tipos),
+                on_click=lambda _: (
+                    self._importar_directo() if sheet_ok else self._dlg_importar()
                 ),
-            ], spacing=10),
-        ], vertical_alignment=ft.CrossAxisAlignment.CENTER)
+            ),
+            ft.IconButton(
+                icon=ft.Icons.TUNE,
+                icon_color=ft.Colors.PURPLE_300,
+                icon_size=16,
+                tooltip="Configurar Sheet",
+                on_click=lambda _: self._dlg_importar(),
+                visible=sheet_ok,
+            ),
+            # Nueva
+            ft.ElevatedButton(
+                "Nueva",
+                icon=ft.Icons.ADD,
+                bgcolor=ft.Colors.BLUE_700, color=ft.Colors.WHITE,
+                on_click=lambda _: self._dlg_nueva(tipos),
+            ),
+        ], spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER)
 
-        # Lista
+        # ── Lista de reservaciones ────────────────────────────────────────────
         if not reservas:
-            lista = ft.Container(
-                content=ft.Column([
-                    ft.Icon(ft.Icons.EVENT_BUSY, size=48,
-                            color=ft.Colors.GREY_300),
-                    ft.Text("No hay reservaciones activas",
+            lista = ft.Column([
+                ft.Container(height=40),
+                ft.Row([
+                    ft.Icon(ft.Icons.EVENT_BUSY, size=36, color=ft.Colors.GREY_300),
+                    ft.Text("No hay reservaciones" +
+                            (" activas" if self._filtro == "activas" else ""),
                             size=14, color=ft.Colors.GREY_400, italic=True),
-                ], horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                   alignment=ft.MainAxisAlignment.CENTER),
-                padding=60, alignment=ft.alignment.center,
-            )
+                ], alignment=ft.MainAxisAlignment.CENTER, spacing=10),
+            ])
         else:
             lista = ft.Column(
                 controls=[self._tarjeta(r, tipos) for r in reservas],
-                spacing=8,
+                spacing=6,
                 scroll=ft.ScrollMode.AUTO,
                 expand=True,
             )
 
         self.content = ft.Column([
-            encabezado,
+            toolbar,
             ft.Divider(height=1, color=ft.Colors.GREY_200),
-            resumen,
             lista,
-        ], spacing=14, expand=True)
+        ], spacing=10, expand=True)
 
     # ─────────────────────────────────────────────────────────────────────────
     # TARJETA DE RESERVACIÓN
@@ -186,147 +170,119 @@ class PantallaReservaciones(ft.Container):
             r.estado, (ft.Colors.GREY_500, ft.Colors.GREY_100, "—")
         )
         noches = (r.fecha_salida - r.fecha_entrada).days
-
-        # Precio estimado
         precio = 0.0
         for t in tipos:
             if t.nombre == r.tipo_habitacion:
                 precio = float(t.precio_actual_usd) * noches
                 break
 
-        # Badge origen
-        origen_badge = ft.Container(
-            content=ft.Text(
-                "🌐 Web" if r.origen == "web" else "🖥 Sistema",
-                size=9, color=ft.Colors.WHITE, weight="bold",
-            ),
-            bgcolor=ft.Colors.PURPLE_700 if r.origen == "web"
-                    else ft.Colors.BLUE_GREY_600,
-            padding=ft.padding.symmetric(horizontal=6, vertical=2),
-            border_radius=6,
-        )
-
-        # Botones de acción según estado
+        # Acciones
         acciones = []
         if r.estado == EstadoReservacion.PENDIENTE:
-            acciones += [
-                ft.TextButton(
-                    "Confirmar", icon=ft.Icons.CHECK_CIRCLE_OUTLINE,
+            acciones = [
+                ft.TextButton("Confirmar",
+                    icon=ft.Icons.CHECK_CIRCLE_OUTLINE,
                     style=ft.ButtonStyle(color=ft.Colors.BLUE_700),
-                    on_click=lambda _, rid=r.id: self._confirmar(rid),
-                ),
-                ft.TextButton(
-                    "Cancelar", icon=ft.Icons.CANCEL_OUTLINED,
+                    on_click=lambda _, rid=r.id: self._confirmar(rid)),
+                ft.TextButton("Cancelar",
+                    icon=ft.Icons.CANCEL_OUTLINED,
                     style=ft.ButtonStyle(color=ft.Colors.RED_400),
-                    on_click=lambda _, rid=r.id: self._cancelar(rid),
-                ),
+                    on_click=lambda _, rid=r.id: self._cancelar(rid)),
             ]
-        if r.estado == EstadoReservacion.CONFIRMADA:
-            acciones += [
-                ft.ElevatedButton(
-                    "Hacer Check-In",
+        elif r.estado == EstadoReservacion.CONFIRMADA:
+            acciones = [
+                ft.ElevatedButton("Check-In",
                     icon=ft.Icons.LOGIN,
                     bgcolor=ft.Colors.GREEN_700, color=ft.Colors.WHITE,
-                    on_click=lambda _, res=r: self._convertir_checkin(res),
-                ),
-                ft.TextButton(
-                    "Cancelar", icon=ft.Icons.CANCEL_OUTLINED,
+                    on_click=lambda _, res=r: self._convertir_checkin(res)),
+                ft.TextButton("Cancelar",
+                    icon=ft.Icons.CANCEL_OUTLINED,
                     style=ft.ButtonStyle(color=ft.Colors.RED_400),
-                    on_click=lambda _, rid=r.id: self._cancelar(rid),
-                ),
+                    on_click=lambda _, rid=r.id: self._cancelar(rid)),
             ]
 
+        # Franja lateral de color según estado
         return ft.Container(
-            content=ft.Column([
-                # Fila superior: nombre + estado + origen
-                ft.Row([
-                    ft.Column([
-                        ft.Row([
-                            ft.Text(f"{r.nombre} {r.apellido}",
-                                    size=14, weight="bold",
-                                    color=ft.Colors.BLUE_GREY_900),
-                            ft.Text(f"· {r.documento or 'Sin doc.'}", size=12,
-                                    color=ft.Colors.GREY_500),
-                        ], spacing=6),
-                        ft.Row([
-                            ft.Icon(ft.Icons.PHONE, size=12,
-                                    color=ft.Colors.GREY_400),
-                            ft.Text(r.telefono or "—", size=11,
-                                    color=ft.Colors.GREY_600),
-                            ft.Text("·", color=ft.Colors.GREY_300),
-                            ft.Icon(ft.Icons.EMAIL_OUTLINED, size=12,
-                                    color=ft.Colors.GREY_400),
-                            ft.Text(r.email or "—", size=11,
-                                    color=ft.Colors.GREY_600),
-                        ], spacing=5),
-                    ], spacing=2, expand=True),
-                    origen_badge,
-                    ft.Container(
-                        content=ft.Text(etiq, size=9, weight="bold",
-                                        color=ft.Colors.WHITE),
-                        bgcolor=color,
-                        padding=ft.padding.symmetric(horizontal=8, vertical=3),
-                        border_radius=8,
-                    ),
-                ], vertical_alignment=ft.CrossAxisAlignment.START),
-
-                # Fila central: tipo, fechas, huéspedes
-                ft.Row([
-                    ft.Container(
-                        content=ft.Row([
-                            ft.Icon(ft.Icons.BED, size=13, color=color),
-                            ft.Text(r.tipo_habitacion, size=12,
-                                    weight="bold", color=color),
-                        ], spacing=4),
-                        bgcolor=bg,
-                        padding=ft.padding.symmetric(horizontal=8, vertical=4),
-                        border_radius=6,
-                        border=ft.border.all(1, ft.Colors.with_opacity(0.3, color)),
-                    ),
+            content=ft.Row([
+                # Franja izquierda de color
+                ft.Container(width=4, bgcolor=color, border_radius=4),
+                # Contenido
+                ft.Column([
+                    # Línea 1: nombre + badges
                     ft.Row([
-                        ft.Icon(ft.Icons.CALENDAR_TODAY, size=12,
-                                color=ft.Colors.GREY_500),
-                        ft.Text(
-                            f"{r.fecha_entrada.strftime('%d/%m/%Y')} → "
-                            f"{r.fecha_salida.strftime('%d/%m/%Y')} "
-                            f"({noches} noche{'s' if noches != 1 else ''})",
-                            size=12, color=ft.Colors.GREY_700,
+                        ft.Text(f"{r.nombre} {r.apellido}",
+                                size=13, weight="bold",
+                                color=ft.Colors.BLUE_GREY_900, expand=True),
+                        ft.Container(
+                            content=ft.Text(
+                                "🌐 Web" if r.origen == "web" else "Sistema",
+                                size=9, color=ft.Colors.WHITE,
+                            ),
+                            bgcolor=ft.Colors.PURPLE_600 if r.origen == "web"
+                                    else ft.Colors.BLUE_GREY_500,
+                            padding=ft.padding.symmetric(horizontal=6, vertical=2),
+                            border_radius=4,
                         ),
-                    ], spacing=5),
+                        ft.Container(
+                            content=ft.Text(etiq, size=9, weight="bold",
+                                            color=ft.Colors.WHITE),
+                            bgcolor=color,
+                            padding=ft.padding.symmetric(horizontal=8, vertical=3),
+                            border_radius=6,
+                        ),
+                    ], spacing=6),
+                    # Línea 2: tipo + fechas + precio
                     ft.Row([
-                        ft.Icon(ft.Icons.PEOPLE, size=12,
-                                color=ft.Colors.GREY_500),
-                        ft.Text(f"{r.num_huespedes} huésped(es)",
-                                size=12, color=ft.Colors.GREY_700),
+                        ft.Container(
+                            content=ft.Text(r.tipo_habitacion, size=11,
+                                            weight="bold", color=color),
+                            bgcolor=bg,
+                            padding=ft.padding.symmetric(horizontal=7, vertical=3),
+                            border_radius=5,
+                            border=ft.border.all(1, ft.Colors.with_opacity(0.25, color)),
+                        ),
+                        ft.Text("│", color=ft.Colors.GREY_300),
+                        ft.Icon(ft.Icons.CALENDAR_TODAY, size=11,
+                                color=ft.Colors.GREY_400),
+                        ft.Text(
+                            f"{r.fecha_entrada.strftime('%d/%m/%y')} → "
+                            f"{r.fecha_salida.strftime('%d/%m/%y')} "
+                            f"· {noches}n",
+                            size=11, color=ft.Colors.GREY_600,
+                        ),
+                        ft.Text("│", color=ft.Colors.GREY_300),
+                        ft.Icon(ft.Icons.PEOPLE_OUTLINE, size=11,
+                                color=ft.Colors.GREY_400),
+                        ft.Text(str(r.num_huespedes), size=11,
+                                color=ft.Colors.GREY_600),
+                        ft.Container(expand=True),
+                        ft.Text(f"~${precio:,.0f}" if precio else "",
+                                size=12, weight="bold",
+                                color=ft.Colors.GREEN_700),
                     ], spacing=5),
-                    ft.Container(expand=True),
-                    ft.Text(
-                        f"~${precio:,.2f}" if precio else "",
-                        size=13, weight="bold", color=ft.Colors.GREEN_700,
-                    ),
-                ], spacing=12, wrap=True),
-
-                # Notas
-                ft.Text(
-                    f"📝 {r.notas}", size=11, color=ft.Colors.GREY_500,
-                    italic=True,
-                ) if r.notas else ft.Container(height=0),
-
-                # Fecha de creación
-                ft.Row([
-                    ft.Text(
-                        f"Creada: {r.creado_en.strftime('%d/%m/%Y %H:%M')}",
-                        size=10, color=ft.Colors.GREY_400,
-                    ),
-                    ft.Container(expand=True),
-                    *acciones,
-                ], vertical_alignment=ft.CrossAxisAlignment.CENTER),
-
-            ], spacing=8),
+                    # Línea 3: contacto + doc
+                    ft.Row([
+                        ft.Icon(ft.Icons.PHONE, size=11, color=ft.Colors.GREY_400),
+                        ft.Text(r.telefono or "—", size=11,
+                                color=ft.Colors.GREY_500),
+                        ft.Text("·", color=ft.Colors.GREY_300, size=11),
+                        ft.Text(r.documento or "Sin doc.", size=11,
+                                color=ft.Colors.GREY_500),
+                        ft.Text("·", color=ft.Colors.GREY_300, size=11),
+                        ft.Text(r.creado_en.strftime("%d/%m %H:%M"),
+                                size=10, color=ft.Colors.GREY_400),
+                        ft.Container(expand=True),
+                        *acciones,
+                    ], spacing=5, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                    # Notas (solo si tiene)
+                    ft.Text(f"📝 {r.notas}", size=10, color=ft.Colors.GREY_500,
+                            italic=True) if r.notas else ft.Container(height=0),
+                ], spacing=5, expand=True),
+            ], spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER),
             bgcolor=ft.Colors.WHITE,
-            border=ft.border.all(1.5, ft.Colors.with_opacity(0.4, color)),
-            border_radius=12,
-            padding=ft.padding.symmetric(horizontal=16, vertical=12),
+            border=ft.border.all(1, ft.Colors.GREY_200),
+            border_radius=10,
+            padding=ft.padding.symmetric(horizontal=10, vertical=10),
         )
 
     # ─────────────────────────────────────────────────────────────────────────

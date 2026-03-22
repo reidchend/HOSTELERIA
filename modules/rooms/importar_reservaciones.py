@@ -23,7 +23,7 @@ from database.models import Reservacion, EstadoReservacion, Configuracion
 # Si falla, usamos gviz que funciona con "compartir con cualquiera"
 _CSV_URL      = "https://docs.google.com/spreadsheets/d/{id}/export?format=csv"
 _CSV_URL_GVIZ = "https://docs.google.com/spreadsheets/d/{id}/gviz/tq?tqx=out:csv"
-_MARCAR_URL  = "{script_url}?action=marcar&fila={fila}"
+_ELIMINAR_URL = "{script_url}?action=eliminar&fila={fila}"
 
 
 def importar(sheet_id: str, script_url: str = "") -> dict:
@@ -63,7 +63,7 @@ def importar(sheet_id: str, script_url: str = "") -> dict:
     errores    = []
 
     try:
-        for idx, fila in enumerate(filas, start=2):  # fila 1 = encabezados
+        for idx, fila in reversed(list(enumerate(filas, start=2))):
             if fila.get("importado", "").strip().upper() != "NO":
                 continue
 
@@ -108,11 +108,12 @@ def importar(sheet_id: str, script_url: str = "") -> dict:
             # Marcar fila en la Sheet (no bloquea si falla)
             if script_url:
                 try:
-                    mark_url = _MARCAR_URL.format(
+                    # Usamos la nueva constante _ELIMINAR_URL
+                    mark_url = _ELIMINAR_URL.format(
                         script_url=script_url, fila=idx)
                     urllib.request.urlopen(mark_url, timeout=5)
                 except Exception:
-                    pass  # no crítico
+                    pass
 
         sesion.commit()
     except Exception as e:

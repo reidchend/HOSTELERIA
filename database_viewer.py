@@ -15,7 +15,6 @@ def main(page: ft.Page):
         ("Habitaciones", models.Habitacion),
         ("Estadías", models.Estadia),
         ("Pagos", models.Pago),
-        ("Cargos Extras", models.CargoExtra),
         ("Caja", models.Caja),
         ("Usuarios", models.Usuario),
         ("Turnos", models.Turno),

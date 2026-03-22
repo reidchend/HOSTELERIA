@@ -1,10 +1,6 @@
 """
 setup.py
 Script de inicialización / reinicio de la base de datos.
-Elimina y recrea todas las tablas con los datos de prueba iniciales.
-
-Uso:
-    python setup.py
 """
 
 from database.connection import motor, Base
@@ -19,10 +15,6 @@ from decimal import Decimal
 
 
 def reiniciar_base_de_datos():
-    """
-    Elimina todas las tablas y las recrea desde cero
-    con un conjunto de datos iniciales para pruebas.
-    """
     print("Eliminando tablas existentes...")
     Base.metadata.drop_all(bind=motor)
 
@@ -33,31 +25,29 @@ def reiniciar_base_de_datos():
     sesion = FabricaSesion()
 
     try:
-        # ── 1. Usuario administrador por defecto ─────────────────────────────
+        # ── 1. Usuario administrador ──────────────────────────────────────────
         print("Creando usuario administrador...")
-        admin = Usuario(
+        sesion.add(Usuario(
             nombre_usuario  = "admin",
             hash_contrasena = hashear_contrasena("admin123"),
             nombre_completo = "Administrador",
             correo          = "admin@hotel.com",
             rol             = RolUsuario.ADMIN,
-        )
-        sesion.add(admin)
+        ))
 
-        # ── 2. Estructura de cajas (principal + chica) ───────────────────────
-        print("Inicializando estructura de cajas...")
-        caja_inicial = Caja(
+        # ── 2. Cajas ──────────────────────────────────────────────────────────
+        print("Inicializando cajas...")
+        sesion.add(Caja(
             saldo_principal_usd  = Decimal("0"),
             saldo_principal_bs   = Decimal("0"),
             caja_chica_usd       = Decimal("100"),
             caja_chica_bs        = Decimal("8000"),
             ultima_actualizacion = datetime.now(),
-        )
-        sesion.add(caja_inicial)
+        ))
 
-        # ── 3. Configuración inicial del sistema ─────────────────────────────
+        # ── 3. Configuración ──────────────────────────────────────────────────
         print("Cargando configuración inicial...")
-        configuraciones = [
+        sesion.add_all([
             Configuracion(
                 clave       = "exchange_rate",
                 valor       = "36.50",
@@ -65,117 +55,142 @@ def reiniciar_base_de_datos():
             ),
             Configuracion(
                 clave       = "hotel_name",
-                valor       = "Hotel Paraíso",
+                valor       = "La Posada de Daniel C.A.",
                 descripcion = "Nombre comercial del hotel",
             ),
             Configuracion(
                 clave       = "tax_percentage",
                 valor       = "16",
-                descripcion = "Porcentaje de impuesto (IVA) aplicado a las facturas",
+                descripcion = "Porcentaje de IVA aplicado a las facturas",
             ),
-        ]
-        sesion.add_all(configuraciones)
+            Configuracion(
+                clave       = "google_sheet_id",
+                valor       = "1Yn4VVUl0vHASnoZtyGUTSqrkob_XxxMyKvbhsEywwvw",
+                descripcion = "ID de la Google Sheet de reservaciones web",
+            ),
+            Configuracion(
+                clave       = "google_script_url",
+                valor       = "https://script.google.com/macros/s/AKfycbw0gMWrVJ67BOeiHJsxAq5s_fgVObgtpHJqA-joTuytSAAWNgwPjU1_vIgTKghcu_Bh/exec",
+                descripcion = "URL del Google Apps Script Web App (reservaciones)",
+            ),
+        ])
 
-        # ── 4. Catálogo de tipos de habitación con precios ───────────────────
-        print("Creando catálogo de tipos de habitación...")
+        # ── 4. Tipos de habitación ────────────────────────────────────────────
+        print("Creando tipos de habitación...")
         tipos_catalogo = [
             TipoHabitacion(
-                nombre            = "Estándar",
-                precio_base_usd   = Decimal("43.10"),
-                precio_actual_usd = Decimal("43.10"),
+                nombre            = "MATRIMONIAL",
+                precio_base_usd   = Decimal("25.86"),
+                precio_actual_usd = Decimal("25.86"),
                 capacidad_default = 2,
-                descripcion       = "Habitación estándar con amenidades básicas",
+                descripcion       = "Habitación matrimonial con amenidades básicas",
             ),
             TipoHabitacion(
-                nombre            = "Doble",
-                precio_base_usd   = Decimal("75.00"),
-                precio_actual_usd = Decimal("75.00"),
+                nombre            = "DOBLE",
+                precio_base_usd   = Decimal("30.17"),
+                precio_actual_usd = Decimal("30.17"),
                 capacidad_default = 2,
-                descripcion       = "Habitación doble con cama king size",
+                descripcion       = "Habitación doble",
             ),
             TipoHabitacion(
-                nombre            = "Suite",
-                precio_base_usd   = Decimal("120.00"),
-                precio_actual_usd = Decimal("120.00"),
+                nombre            = "SUITE",
+                precio_base_usd   = Decimal("30.17"),
+                precio_actual_usd = Decimal("30.17"),
                 capacidad_default = 2,
-                descripcion       = "Suite con sala de estar y vista panorámica",
+                descripcion       = "Suite con sala de estar",
             ),
             TipoHabitacion(
-                nombre            = "Familiar",
-                precio_base_usd   = Decimal("90.00"),
-                precio_actual_usd = Decimal("90.00"),
-                capacidad_default = 4,
-                descripcion       = "Habitación familiar con dos camas dobles",
+                nombre            = "TRIPLE",
+                precio_base_usd   = Decimal("34.48"),
+                precio_actual_usd = Decimal("34.48"),
+                capacidad_default = 3,
+                descripcion       = "Habitación triple",
             ),
             TipoHabitacion(
-                nombre            = "VIP",
-                precio_base_usd   = Decimal("150.00"),
-                precio_actual_usd = Decimal("150.00"),
-                capacidad_default = 2,
-                descripcion       = "Habitación VIP con servicio prioritario",
+                nombre            = "QUINTUPLE",
+                precio_base_usd   = Decimal("38.79"),
+                precio_actual_usd = Decimal("38.79"),
+                capacidad_default = 5,
+                descripcion       = "Habitación quíntuple",
             ),
             TipoHabitacion(
-                nombre            = "Presidencial",
-                precio_base_usd   = Decimal("200.00"),
-                precio_actual_usd = Decimal("200.00"),
-                capacidad_default = 2,
-                descripcion       = "Suite presidencial con todas las comodidades",
+                nombre            = "INDIVIDUAL",
+                precio_base_usd   = Decimal("17.24"),
+                precio_actual_usd = Decimal("17.24"),
+                capacidad_default = 1,
+                descripcion       = "Habitación individual",
             ),
         ]
         sesion.add_all(tipos_catalogo)
-        sesion.flush()  # obtener IDs antes de usarlos en habitaciones
+        sesion.flush()
 
-        # Mapa nombre → objeto para asignar precios a habitaciones
         tipo_map = {t.nombre: t for t in tipos_catalogo}
 
-        # ── 5. Habitaciones del 2 al 40 ──────────────────────────────────────
-        print("Generando habitaciones (2 al 40)...")
-        rotacion_tipos = ["Estándar", "Doble", "Suite", "Familiar"]
+        # ── 5. Habitaciones 2–40 ──────────────────────────────────────────────
+        print("Generando habitaciones (2 al 40) con asignación específica...")
+        
+        # Definición de listas según tu requerimiento
+        dobles      = [12, 16, 28, 38, 39, 40]
+        triples     = [25, 27, 29, 30]
+        quintuple   = [35]
+        individual  = [36]
 
         for numero in range(2, 41):
-            nombre_tipo = rotacion_tipos[numero % len(rotacion_tipos)]
-            tipo_obj    = tipo_map[nombre_tipo]
+            # Lógica de asignación basada en las listas
+            if numero in dobles:
+                tipo_nombre = "DOBLE"
+            elif numero in triples:
+                tipo_nombre = "TRIPLE"
+            elif numero in quintuple:
+                tipo_nombre = "QUINTUPLE"
+            elif numero in individual:
+                tipo_nombre = "INDIVIDUAL"
+            else:
+                tipo_nombre = "MATRIMONIAL" # El resto por defecto
 
+            t = tipo_map[tipo_nombre]
+            
             sesion.add(Habitacion(
                 numero            = str(numero),
                 piso              = (numero // 10) + 1,
-                tipo              = tipo_obj.nombre,
+                tipo              = t.nombre,
                 estado            = EstadoHabitacion.FREE,
-                precio_base_usd   = tipo_obj.precio_base_usd,
-                precio_actual_usd = tipo_obj.precio_actual_usd,
-                capacidad_maxima  = tipo_obj.capacidad_default,
-                descripcion       = f"Habitación {tipo_obj.nombre} #{numero}",
+                precio_base_usd   = t.precio_base_usd,
+                precio_actual_usd = t.precio_actual_usd,
+                capacidad_maxima  = t.capacidad_default,
+                descripcion       = f"Habitación {t.nombre} #{numero}",
                 amenidades        = "WiFi, TV, A/A, Agua Caliente",
             ))
 
         sesion.commit()
 
-        print("\n" + "=" * 48)
+        print("\n" + "=" * 50)
         print("  BASE DE DATOS PREPARADA CORRECTAMENTE")
-        print("=" * 48)
+        print("=" * 50)
         print(f"  Usuario admin    →  admin / admin123")
-        print(f"  Caja principal   →  $0.00  |  Bs. 0,00")
+        print(f"  Hotel            →  La Posada de Daniel C.A.")
         print(f"  Caja chica       →  $100.00  |  Bs. 8.000,00")
-        print(f"  Tasa inicial     →  36.50 Bs/$")
-        print(f"  IVA              →  16%")
+        print(f"  Tasa inicial     →  36.50 Bs/$  |  IVA: 16%")
         print(f"  Tipos creados    →  {len(tipos_catalogo)}")
         print(f"  Habitaciones     →  39 disponibles (2–40)")
-        print("=" * 48)
+        print(f"  Google Sheet     →  ✅ configurado")
+        print(f"  Apps Script      →  ✅ configurado")
+        print("=" * 50)
 
     except Exception as error:
         sesion.rollback()
-        print(f"\n❌ Error crítico durante la inicialización: {error}")
+        print(f"\n❌ Error: {error}")
         raise
     finally:
         sesion.close()
 
 
 if __name__ == "__main__":
-    print("=" * 48)
+    print("=" * 50)
     print("  REINICIO TOTAL DE LA BASE DE DATOS")
-    print("=" * 48)
-    print("⚠  ADVERTENCIA: Esto borrará todos los datos existentes.")
-    respuesta = input("\n¿Confirmar limpieza y recreación total? (s/N): ")
+    print("=" * 50)
+    print("⚠  Esto borrará todos los datos existentes.")
+    respuesta = input("\n¿Confirmar? (s/N): ")
     if respuesta.lower() == "s":
         reiniciar_base_de_datos()
     else:
