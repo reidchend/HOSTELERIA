@@ -82,34 +82,34 @@ class DialogoPago:
       Huesped.credito_usd (opción "saldo a favor") o se entrega en físico.
     """
 
-    def __init__(self, pagina, estadia, total_a_pagar, al_completar, lineas_ids=None):
+    def __init__(self, pagina, estadia, total_a_pagar, al_completar,
+                 lineas_ids=None, checkin_info=None):
         self.pagina        = pagina
         self.estadia       = estadia
         self.id_estadia    = estadia.id
         self.total_a_pagar = total_a_pagar
         self.al_completar  = al_completar
         self.lineas_ids    = lineas_ids or []
+        # Datos del check-in para registrar el mensaje final en bitácora.
+        # Si es None, el pago proviene de details.py (no de un check-in nuevo).
+        self.checkin_info  = checkin_info
         self.dialogo       = None
-
+ 
         sesion = SesionLocal()
         try:
             self.config = leer_config_financiera(sesion)
             self.saldo_favor_disponible = self._leer_credito_titular(sesion)
         finally:
             sesion.close()
-
-        self.pagos_sesion = []
-
+ 
+        self.pagos_sesion         = []
         self.columna_saldo        = ft.Column(spacing=6)
         self.columna_pagos_sesion = ft.Column(spacing=6)
         self.area_formulario      = ft.Column(spacing=8)
-        self.seccion_sobrante  = ft.Container(visible=False)
-        self.btn_finalizar     = None
-        self._gestor_vuelto    = None   # GestorVuelto activo cuando hay sobrante
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # HELPERS DE SALDO  —  fuente única: Huesped.credito_usd
-    # ══════════════════════════════════════════════════════════════════════════
+        self.seccion_sobrante     = ft.Container(visible=False)
+        self.btn_finalizar        = None
+        self._gestor_vuelto       = None
+        self._campo_telefono_pm   = None   # referencia al campo teléfono de Pago Móvil
 
     def _leer_credito_titular(self, sesion):
         """Devuelve el credito_usd del titular de esta estadía."""
@@ -422,14 +422,18 @@ class DialogoPago:
     # ══════════════════════════════════════════════════════════════════════════
 
     def seleccionar_metodo(self, metodo):
-        cfg = CONFIGURACION_METODOS[metodo]
+        cfg  = CONFIGURACION_METODOS[metodo]
         es_bs = cfg["es_bs"]
         necesita_referencia = metodo not in [MetodoPago.CASH_USD, MetodoPago.CASH_BS]
+        es_pago_movil       = metodo == MetodoPago.PAGO_MOVIL
         tasa = self.config.tasa_cambio
-
+ 
         pendiente = self._pendiente()
-        valor_sug = f"{a_bs(pendiente, tasa):.2f}" if (pendiente > 0 and es_bs) else (f"{pendiente:.2f}" if pendiente > 0 else "0.00")
-
+        valor_sug = (
+            f"{a_bs(pendiente, tasa):.2f}" if (pendiente > 0 and es_bs)
+            else (f"{pendiente:.2f}" if pendiente > 0 else "0.00")
+        )
+ 
         campo_monto = ft.TextField(
             label=f"Monto recibido ({'Bs.' if es_bs else 'USD'})",
             value=valor_sug,
@@ -438,7 +442,20 @@ class DialogoPago:
             text_align=ft.TextAlign.RIGHT,
             autofocus=True, expand=True,
         )
-        campo_ref = ft.TextField(label="Nro. Referencia / Confirmación", visible=necesita_referencia, expand=True)
+        campo_ref = ft.TextField(
+            label="Nro. Referencia / Confirmación",
+            visible=necesita_referencia, expand=True,
+        )
+        # Campo teléfono — solo para Pago Móvil
+        campo_telefono = ft.TextField(
+            label="Teléfono (Pago Móvil)",
+            hint_text="04XX-XXX-XXXX",
+            visible=es_pago_movil,
+            expand=True,
+        )
+        # Guardar referencia para recuperarlo al finalizar
+        if es_pago_movil:
+            self._campo_telefono_pm = campo_telefono
 
         def agregar(evento):
             try:
@@ -450,23 +467,52 @@ class DialogoPago:
                 campo_monto.error_text = None
                 monto_usd = a_usd(valor, tasa) if es_bs else valor
                 monto_bs  = valor if es_bs else a_bs(valor, tasa)
-                self.pagos_sesion.append({
-                    "metodo": metodo, "monto_usd": monto_usd, "monto_bs": monto_bs,
-                    "referencia": campo_ref.value.strip() if necesita_referencia else "",
-                    "etiqueta": cfg["etiqueta"], "color": cfg["color"], "icono": cfg["icono"],
+ 
+                pago_dict = {
+                    "metodo":       metodo,
+                    "monto_usd":    monto_usd,
+                    "monto_bs":     monto_bs,
+                    "referencia":   campo_ref.value.strip() if necesita_referencia else "",
+                    "etiqueta":     cfg["etiqueta"],
+                    "color":        cfg["color"],
+                    "icono":        cfg["icono"],
                     "visualizacion": f"Bs. {valor:,.2f}" if es_bs else f"${valor:.2f}",
-                })
+                }
+                # Guardar teléfono dentro del dict si es Pago Móvil
+                if es_pago_movil:
+                    pago_dict["telefono_pm"] = campo_telefono.value.strip()
+ 
+                self.pagos_sesion.append(pago_dict)
                 self.refrescar_interfaz()
             except (ValueError, AttributeError):
                 campo_monto.error_text = "Número inválido"
                 campo_monto.update()
-
+ 
+        # Construir fila de campos según método
+        if es_pago_movil:
+            fila_campos = ft.Column([
+                ft.Row([campo_monto, campo_ref], spacing=10),
+                campo_telefono,
+            ], spacing=8)
+        elif necesita_referencia:
+            fila_campos = ft.Row([campo_monto, campo_ref], spacing=10)
+        else:
+            fila_campos = ft.Row([campo_monto], spacing=10)
+ 
         self.area_formulario.controls = [
             ft.Container(
-                content=ft.Column(controls=[
-                    ft.Row(controls=[ft.Icon(cfg["icono"], color=cfg["color"], size=18), ft.Text(cfg["etiqueta"], weight="bold", color=cfg["color"], size=13)], spacing=6),
-                    ft.Row(controls=[campo_monto, campo_ref] if necesita_referencia else [campo_monto], spacing=10),
-                    ft.ElevatedButton("+ AGREGAR PAGO", bgcolor=cfg["color"], color=ft.Colors.WHITE, on_click=agregar, expand=True, height=40),
+                content=ft.Column([
+                    ft.Row([
+                        ft.Icon(cfg["icono"], color=cfg["color"], size=18),
+                        ft.Text(cfg["etiqueta"], weight="bold",
+                                color=cfg["color"], size=13),
+                    ], spacing=6),
+                    fila_campos,
+                    ft.ElevatedButton(
+                        "+ AGREGAR PAGO",
+                        bgcolor=cfg["color"], color=ft.Colors.WHITE,
+                        on_click=agregar, expand=True, height=40,
+                    ),
                 ], spacing=10),
                 padding=14,
                 bgcolor=ft.Colors.with_opacity(0.04, cfg["color"]),
@@ -1033,25 +1079,80 @@ class DialogoPago:
                         titular_id = titular_id,
                     )
 
-            # Registrar en bitácora
+            # ── Registrar bitácora ────────────────────────────────────────────
+ 
             hab_num = ""
             if estadia_bd and estadia_bd.habitacion:
                 hab_num = estadia_bd.habitacion.numero
-            _bita(
-                sesion     = sesion,
-                pagina     = self.pagina,
-                tipo       = _TE.PAGO,
-                habitacion = hab_num,
-                concepto   = (
-                    f"Cobro ${self.total_a_pagar:.2f} — "
-                    f"{'Completo' if saldo_pendiente_tx <= 0.01 else f'Parcial, quedan ${saldo_pendiente_tx:.2f}'}"
-                ),
-                monto_usd  = total_pagado_usd,
-                monto_bs   = sum(p.get('monto_bs', 0) for p in self.pagos_sesion),
-                metodo_pago = ", ".join({p['metodo'].value for p in self.pagos_sesion}),
-                confirmado  = saldo_pendiente_tx <= 0.01,
-            )
-
+ 
+            # Construir detalle de métodos de pago para el concepto
+            def _detalle_metodos(pagos: list) -> str:
+                partes = []
+                for p in pagos:
+                    metodo_val = p["metodo"].value if hasattr(p["metodo"], "value") else str(p["metodo"])
+                    if p["metodo"] == MetodoPago.PAGO_MOVIL:
+                        tel = p.get("telefono_pm", "")
+                        ref = p.get("referencia", "")
+                        bs  = p.get("monto_bs", 0)
+                        parte = f"Pago Móvil Bs.{bs:,.2f}"
+                        if ref: parte += f" Ref:{ref}"
+                        if tel: parte += f" Tlf:{tel}"
+                        partes.append(parte)
+                    else:
+                        partes.append(metodo_val)
+                return " + ".join(partes)
+ 
+            if self.checkin_info:
+                # Viene de un check-in nuevo — mensaje con estado final de pago
+                ci = self.checkin_info
+                if saldo_pendiente_tx > 0.01:
+                    concepto_bita = (
+                        f"Hab{ci['habitacion']} ${ci['monto']:.2f} "
+                        f"pendiente por cancelar — "
+                        f"{ci['nombre']} · "
+                        f"{ci['noches']} noche{'s' if ci['noches'] > 1 else ''} · "
+                        f"Sal. {ci['fecha_salida']}"
+                    )
+                    confirmado_bita = False
+                else:
+                    detalle = _detalle_metodos(self.pagos_sesion)
+                    concepto_bita = (
+                        f"Hab{ci['habitacion']} ${ci['monto']:.2f} "
+                        f"cancelado por {detalle} — "
+                        f"{ci['nombre']} · "
+                        f"{ci['noches']} noche{'s' if ci['noches'] > 1 else ''} · "
+                        f"Sal. {ci['fecha_salida']}"
+                    )
+                    confirmado_bita = True
+ 
+                _bita(
+                    sesion      = sesion,
+                    pagina      = self.pagina,
+                    tipo        = _TE.CHECKIN,
+                    habitacion  = hab_num,
+                    concepto    = concepto_bita,
+                    monto_usd   = total_pagado_usd,
+                    monto_bs    = sum(p.get("monto_bs", 0) for p in self.pagos_sesion),
+                    metodo_pago = _detalle_metodos(self.pagos_sesion),
+                    confirmado  = confirmado_bita,
+                )
+            else:
+                # Pago desde details.py (no es check-in nuevo)
+                _bita(
+                    sesion      = sesion,
+                    pagina      = self.pagina,
+                    tipo        = _TE.PAGO,
+                    habitacion  = hab_num,
+                    concepto    = (
+                        f"Cobro ${self.total_a_pagar:.2f} — "
+                        f"{'Completo' if saldo_pendiente_tx <= 0.01 else f'Parcial, quedan ${saldo_pendiente_tx:.2f}'}"
+                    ),
+                    monto_usd   = total_pagado_usd,
+                    monto_bs    = sum(p.get("monto_bs", 0) for p in self.pagos_sesion),
+                    metodo_pago = ", ".join({p["metodo"].value for p in self.pagos_sesion}),
+                    confirmado  = saldo_pendiente_tx <= 0.01,
+                )
+ 
             sesion.commit()
             self.pagina.close(self.dialogo)
             self.pagina.open(ft.SnackBar(

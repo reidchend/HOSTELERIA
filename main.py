@@ -305,16 +305,62 @@ def principal(pagina: ft.Page):
         # Primera y única construcción completa del layout de la app
         _construir_interfaz_app()
 
-    def cerrar_sesion():
-        """Limpia el estado y regresa a la pantalla de login."""
-        estado_app["usuario_activo"] = None
-        mostrar_login()
+    # REEMPLAZAR la función cerrar_sesion() en main.py
+# Ubicación: dentro de la función principal(), antes de _construir_barra_superior()
 
-    # ════════════════════════════════════════════════════════════════════════
-    # CONSTRUCCIÓN ÚNICA DEL LAYOUT DE LA APP
-    # Se ejecuta UNA SOLA VEZ después del login. A partir de aquí todas
-    # las actualizaciones son quirúrgicas sobre los contenedores referenciados.
-    # ════════════════════════════════════════════════════════════════════════
+    def cerrar_sesion():
+        """
+        Antes de cerrar sesión verifica si hay un turno activo.
+        Si lo hay, muestra el DialogoCierreTurno para que el recepcionista
+        haga el cierre formal. Al confirmar, limpia la sesión y vuelve al login.
+        """
+        # Buscar turno activo en BD
+        from database.connection import SesionLocal
+        from database.models import Turno
+
+        sesion = SesionLocal()
+        try:
+            turno_activo = sesion.query(Turno).filter(
+                Turno.activo == True
+            ).first()
+            id_turno = turno_activo.id if turno_activo else None
+        except Exception:
+            id_turno = None
+        finally:
+            sesion.close()
+
+        if id_turno:
+            # Hay turno activo → mostrar cierre formal primero
+            from modules.finance.shift_closing import DialogoCierreTurno
+            DialogoCierreTurno(
+                pagina       = pagina,
+                id_turno     = id_turno,
+                al_cerrar_turno = _ejecutar_cierre_sesion,
+            ).mostrar()
+        else:
+            # No hay turno activo → cerrar sesión directo
+            _ejecutar_cierre_sesion()
+
+    def _ejecutar_cierre_sesion():
+        """
+        Limpia todo el estado y regresa al login.
+        Se llama tras confirmar el cierre de turno (o directo si no había turno).
+        """
+        # 1. Limpiar estado global de la app
+        estado_app["usuario_activo"] = None
+        estado_app["tasa_cambio"]    = 35.5
+        estado_app["habitacion_sel"] = None
+        estado_app["vista_activa"]   = "dashboard"
+
+        # 2. Limpiar sesión de página
+        for clave in ["id_turno_actual", "usuario_activo", "tasa_cambio"]:
+            try:
+                pagina.session.remove(clave)
+            except Exception:
+                pass
+
+        # 3. Volver al login
+        mostrar_login()
 
     def _construir_barra_superior() -> ft.Container:
         """

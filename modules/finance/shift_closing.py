@@ -9,20 +9,28 @@ from database.models import Turno, Pago, Caja
 class DialogoCierreTurno:
     """
     Diálogo de cierre de turno.
-    Muestra el resumen calculado por el sistema (ventas netas y fondo de caja chica),
-    pide el conteo físico del recepcionista y registra las diferencias al cerrar.
+    Muestra el resumen calculado por el sistema, pide el conteo físico
+    y registra las diferencias al cerrar.
+    Envía notificación completa a Telegram automáticamente.
     """
 
     def __init__(self, pagina: ft.Page, id_turno: int, al_cerrar_turno):
-        self.pagina         = pagina
-        self.id_turno       = id_turno
+        self.pagina          = pagina
+        self.id_turno        = id_turno
         self.al_cerrar_turno = al_cerrar_turno
-        self.dialogo        = None
+        self.dialogo         = None
+        self._recepcionista  = ""
 
-        # Calcular los saldos esperados por el sistema antes de construir la UI
+        # Leer nombre del recepcionista desde la sesión
+        try:
+            usuario = pagina.session.get("usuario_activo") or {}
+            self._recepcionista = usuario.get("nombre_completo", "")
+        except Exception:
+            pass
+
+        # Calcular los saldos esperados
         self.resumen = self.calcular_saldos_sistema()
 
-        # Campos de conteo físico
         self.campo_principal_usd = ft.TextField(
             label="Monto Físico Caja Principal ($)",
             prefix_text="$ ", value="0",
@@ -34,7 +42,6 @@ class DialogoCierreTurno:
             on_change=self.revisar_diferencias,
         )
 
-        # Etiquetas de diferencia (se actualizan mientras escribe)
         self.texto_diferencia_principal = ft.Text("Diferencia: $ 0.00", color=ft.Colors.GREY)
         self.texto_diferencia_chica     = ft.Text("Diferencia: $ 0.00", color=ft.Colors.GREY)
 
@@ -43,10 +50,6 @@ class DialogoCierreTurno:
     # ─────────────────────────────────────────────────────────────────────────
 
     def calcular_saldos_sistema(self) -> dict:
-        """
-        Suma todos los pagos cobrados durante el turno y los vueltos entregados
-        para calcular lo que el sistema espera encontrar en cada caja.
-        """
         sesion = SesionLocal()
         try:
             turno = sesion.get(Turno, self.id_turno)
@@ -68,13 +71,17 @@ class DialogoCierreTurno:
                 Pago.descripcion.contains("chica"),
             ).all()
 
-            ingresos_usd     = sum(p.monto_usd for p in cobros)
-            salidas_principal = sum(r.monto_usd for r in devoluciones_principal)
-            salidas_chica     = sum(r.monto_usd for r in devoluciones_chica)
+            ingresos_usd       = float(sum(p.monto_usd for p in cobros))
+            vueltos_usd        = float(sum(p.monto_usd for p in (devoluciones_principal + devoluciones_chica)))
+            salidas_principal  = float(sum(r.monto_usd for r in devoluciones_principal))
+            salidas_chica      = float(sum(r.monto_usd for r in devoluciones_chica))
 
             return {
                 "esperado_principal": ingresos_usd - salidas_principal,
-                "esperado_chica":     turno.inicial_usd - salidas_chica,
+                "esperado_chica":     float(turno.inicial_usd) - salidas_chica,
+                "total_cobrado":      ingresos_usd,
+                "total_vueltos":      vueltos_usd,
+                "neto":               ingresos_usd - vueltos_usd,
             }
         finally:
             sesion.close()
@@ -84,7 +91,6 @@ class DialogoCierreTurno:
     # ─────────────────────────────────────────────────────────────────────────
 
     def revisar_diferencias(self, evento):
-        """Compara el conteo físico ingresado con el saldo esperado del sistema."""
         try:
             fisico_principal = float(self.campo_principal_usd.value or 0)
             fisico_chica     = float(self.campo_chica_usd.value     or 0)
@@ -96,12 +102,10 @@ class DialogoCierreTurno:
             self.texto_diferencia_principal.color = (
                 ft.Colors.RED_700 if diff_principal < 0 else ft.Colors.GREEN_700
             )
-
             self.texto_diferencia_chica.value = f"Diferencia: $ {diff_chica:.2f}"
             self.texto_diferencia_chica.color = (
                 ft.Colors.RED_700 if diff_chica < 0 else ft.Colors.GREEN_700
             )
-
             self.pagina.update()
         except Exception:
             pass
@@ -112,25 +116,41 @@ class DialogoCierreTurno:
 
     def finalizar_turno(self, evento):
         """
-        Marca el turno como cerrado, registra el conteo real del recepcionista
-        y pone la caja principal en $0 (el dinero se entrega a administración).
+        Marca el turno como cerrado y envía el resumen a Telegram.
         """
         sesion = SesionLocal()
         try:
+            fisico_principal = float(self.campo_principal_usd.value or 0)
+            fisico_chica     = float(self.campo_chica_usd.value     or 0)
+            diferencia       = fisico_principal - self.resumen["esperado_principal"]
+
             turno = sesion.get(Turno, self.id_turno)
             turno.hora_fin     = datetime.now()
             turno.usd_esperado = self.resumen["esperado_principal"]
-            turno.usd_real     = float(self.campo_principal_usd.value)
+            turno.usd_real     = fisico_principal
             turno.activo       = False
 
-            # La caja principal queda en $0 tras la entrega a administración.
-            # La caja chica mantiene el conteo físico para el siguiente turno.
             caja = sesion.query(Caja).first()
             caja.saldo_principal_usd  = 0.0
-            caja.caja_chica_usd       = float(self.campo_chica_usd.value)
+            caja.caja_chica_usd       = fisico_chica
             caja.ultima_actualizacion = datetime.now()
 
             sesion.commit()
+
+            # ── Notificación Telegram de cierre de turno ──────────────────────
+            try:
+                from modules.notifications.dispatcher import enviar_cierre_turno
+                enviar_cierre_turno(
+                    recepcionista  = self._recepcionista,
+                    cobrado_usd    = self.resumen["total_cobrado"],
+                    vueltos_usd    = self.resumen["total_vueltos"],
+                    neto_usd       = self.resumen["neto"],
+                    caja_chica_usd = fisico_chica,
+                    diferencia_usd = diferencia,
+                )
+            except Exception as e:
+                print(f"[CierreTurno] Error al notificar Telegram: {e}")
+
             self.pagina.close(self.dialogo)
             if self.al_cerrar_turno:
                 self.al_cerrar_turno()
@@ -149,7 +169,6 @@ class DialogoCierreTurno:
     # ─────────────────────────────────────────────────────────────────────────
 
     def mostrar(self):
-        """Construye y abre el diálogo de cierre de turno."""
         self.dialogo = ft.AlertDialog(
             title=ft.Row([
                 ft.Icon(ft.Icons.LOCK),

@@ -16,6 +16,10 @@ class DialogoCheckIn:
     Formulario de check-in para una habitación libre.
     Permite registrar al huésped titular y sus acompañantes,
     calcular el total de la estadía y lanzar el módulo de cobro.
+
+    Bitácora / Telegram:
+      · Si omite el pago  → "Hab# $XX.XX pendiente por cancelar"
+      · Si cobra ahora    → el mensaje lo registra payment_dialog al finalizar
     """
 
     def __init__(self, pagina: ft.Page, habitacion: Habitacion, al_completar):
@@ -24,9 +28,10 @@ class DialogoCheckIn:
         self.al_completar  = al_completar
         self.dialogo       = None
 
-        self.controles_acompanantes  = []
-        self.estadia_actual          = None
-        self.total_calculado         = 0.0
+        self.controles_acompanantes = []
+        self.estadia_actual         = None
+        self.total_calculado        = 0.0
+        self._hab_numero            = habitacion.numero   # para el mensaje
 
         # ── Campos de fecha ─────────────────────────────────────────────────
         self.campo_entrada = ft.TextField(
@@ -73,19 +78,13 @@ class DialogoCheckIn:
         )
 
     # ─────────────────────────────────────────────────────────────────────────
-    # BÚSQUEDA DE HUÉSPEDES EXISTENTES
+    # BÚSQUEDA DE HUÉSPEDES
     # ─────────────────────────────────────────────────────────────────────────
 
     def evento_buscar_huesped(self, evento):
-        """Busca el huésped al pulsar Enter en el campo de documento."""
         self.buscar_huesped(evento)
 
     def buscar_huesped(self, evento):
-        """
-        Rellena los campos del titular si el documento ya existe en la BD.
-        Si el huésped está en lista negra, muestra una advertencia bloqueante.
-        Si tiene deuda registrada (credito_usd negativo), informa al recepcionista.
-        """
         if not self.campo_documento.value:
             return
         sesion = SesionLocal()
@@ -101,24 +100,17 @@ class DialogoCheckIn:
             self.campo_telefono.value     = huesped.telefono
             self.campo_vehiculo.value     = huesped.vehiculo
 
-            # ── Alerta de lista negra — INLINE dentro del diálogo de check-in ──
-            # NO se abre un nuevo dialog (Flet 0.28.3 no distingue por referencia
-            # al cerrar y podría cerrar el dialog de check-in por error).
-            # En su lugar se reemplaza el contenido del dialogo existente.
             if huesped.lista_negra:
                 motivo = huesped.motivo_veto or "Sin motivo especificado."
-
-                # Guardar el contenido original para poder restaurarlo
-                contenido_original = self.dialogo.content
+                contenido_original  = self.dialogo.content
                 acciones_originales = self.dialogo.actions
 
-                def _continuar_checkin(_):
-                    # Restaurar el contenido original del check-in
+                def _continuar(_):
                     self.dialogo.content = contenido_original
                     self.dialogo.actions = acciones_originales
                     self.dialogo.update()
 
-                def _cancelar_checkin(_):
+                def _cancelar(_):
                     self.pagina.close(self.dialogo)
 
                 self.dialogo.content = ft.Container(
@@ -136,8 +128,7 @@ class DialogoCheckIn:
                         ft.Container(
                             content=ft.Column([
                                 ft.Text("Motivo del veto:", size=11, color=ft.Colors.GREY_600),
-                                ft.Text(motivo, size=13, color=ft.Colors.RED_800,
-                                        weight="bold"),
+                                ft.Text(motivo, size=13, color=ft.Colors.RED_800, weight="bold"),
                             ], spacing=4),
                             bgcolor=ft.Colors.RED_50, padding=12, border_radius=8,
                             border=ft.border.all(1, ft.Colors.RED_200),
@@ -153,17 +144,16 @@ class DialogoCheckIn:
                     ft.TextButton(
                         "✕ Cancelar check-in",
                         style=ft.ButtonStyle(color=ft.Colors.RED_700),
-                        on_click=_cancelar_checkin,
+                        on_click=_cancelar,
                     ),
                     ft.ElevatedButton(
                         "Continuar de todas formas →",
                         bgcolor=ft.Colors.ORANGE_700, color="white",
-                        on_click=_continuar_checkin,
+                        on_click=_continuar,
                     ),
                 ]
                 self.dialogo.update()
 
-            # ── Alerta de deuda pendiente ──────────────────────────────────
             elif float(huesped.credito_usd or 0) < -0.01:
                 deuda = abs(float(huesped.credito_usd))
                 self.pagina.open(ft.SnackBar(
@@ -172,8 +162,7 @@ class DialogoCheckIn:
                         "de estadías anteriores. Se cargará automáticamente.",
                         color=ft.Colors.WHITE,
                     ),
-                    bgcolor=ft.Colors.ORANGE_800,
-                    duration=6000,
+                    bgcolor=ft.Colors.ORANGE_800, duration=6000,
                 ))
             else:
                 self.pagina.open(ft.SnackBar(
@@ -187,35 +176,27 @@ class DialogoCheckIn:
     # ─────────────────────────────────────────────────────────────────────────
 
     def agregar_campo_acompanante(self, evento):
-        """Agrega una fila de campos para un nuevo acompañante."""
         if len(self.controles_acompanantes) >= (self.habitacion.capacidad_maxima - 1):
             self.pagina.open(ft.SnackBar(
                 ft.Text("Capacidad máxima de huéspedes alcanzada"), bgcolor="orange"
             ))
             return
-
-        campo_doc     = ft.TextField(label="Doc. Acompañante", expand=2,
-                                     on_submit=self.buscar_acompanante_dinamico)
-        campo_nombre  = ft.TextField(label="Nombre",   expand=3)
-        campo_apellido= ft.TextField(label="Apellido", expand=3)
-
+        campo_doc      = ft.TextField(label="Doc. Acompañante", expand=2,
+                                      on_submit=self.buscar_acompanante_dinamico)
+        campo_nombre   = ft.TextField(label="Nombre",   expand=3)
+        campo_apellido = ft.TextField(label="Apellido", expand=3)
         fila = ft.Row([
             campo_doc, campo_nombre, campo_apellido,
-            ft.IconButton(
-                ft.Icons.DELETE_OUTLINE, icon_color="red",
-                on_click=lambda _, f=None: self.eliminar_acompanante(fila),
-            ),
+            ft.IconButton(ft.Icons.DELETE_OUTLINE, icon_color="red",
+                          on_click=lambda _, f=None: None),
         ])
-        # Corregir la referencia circular del botón de eliminar
         fila.controls[-1].on_click = lambda _, f=fila: self.eliminar_acompanante(f)
-
         self.controles_acompanantes.append(fila)
         self.contenedor_acompanantes.controls.append(fila)
         self.pagina.update()
         campo_doc.focus()
 
     def eliminar_acompanante(self, fila):
-        """Elimina una fila de acompañante del formulario."""
         if fila in self.controles_acompanantes:
             self.controles_acompanantes.remove(fila)
         if fila in self.contenedor_acompanantes.controls:
@@ -223,7 +204,6 @@ class DialogoCheckIn:
         self.pagina.update()
 
     def buscar_acompanante_dinamico(self, evento):
-        """Rellena nombre y apellido del acompañante si ya está registrado."""
         doc = evento.control.value
         if not doc:
             return
@@ -241,10 +221,6 @@ class DialogoCheckIn:
     # ─────────────────────────────────────────────────────────────────────────
 
     def guardar_checkin(self, evento):
-        """
-        Valida los datos, crea/actualiza la ficha del huésped y la estadía,
-        cambia el estado de la habitación a OCUPADA y lanza el módulo de cobro.
-        """
         if not self.campo_documento.value or not self.campo_nombre.value:
             self.pagina.open(ft.SnackBar(
                 ft.Text("Faltan datos del titular"), bgcolor="red"
@@ -253,7 +229,6 @@ class DialogoCheckIn:
 
         sesion = SesionLocal()
         try:
-            # 1. Procesar huésped titular y acompañantes
             titular = self.obtener_o_crear_huesped(
                 sesion, self.campo_documento.value,
                 self.campo_nombre.value, self.campo_apellido.value, es_titular=True,
@@ -265,29 +240,23 @@ class DialogoCheckIn:
                 nombre = fila.controls[1].value
                 apell  = fila.controls[2].value
                 if doc and nombre:
-                    acomp = self.obtener_o_crear_huesped(sesion, doc, nombre, apell, es_titular=False)
+                    acomp = self.obtener_o_crear_huesped(
+                        sesion, doc, nombre, apell, es_titular=False
+                    )
                     lista_huespedes.append(acomp)
 
-            # 2. Cambiar estado de la habitación a OCUPADA
             habitacion_bd = sesion.query(Habitacion).filter(
                 Habitacion.id == self.habitacion.id
             ).first()
             habitacion_bd.estado = EstadoHabitacion.OCCUPIED
 
-            # 3. Calcular noches y total
             fecha_entrada = datetime.strptime(self.campo_entrada.value, "%Y-%m-%d")
             fecha_salida  = datetime.strptime(self.campo_salida.value,  "%Y-%m-%d")
             noches        = max(1, (fecha_salida - fecha_entrada).days)
             precio_noche  = (
-                habitacion_bd.precio_actual_usd
-                if habitacion_bd.precio_actual_usd
-                else habitacion_bd.precio_base_usd
+                habitacion_bd.precio_actual_usd or habitacion_bd.precio_base_usd
             )
-            self.total_calculado = noches * precio_noche
 
-            # 4. Crear la estadía
-            # El crédito previo permanece en Huesped.credito_usd.
-            # Estadia.deposito_usd ya no se usa para saldo a favor.
             self.estadia_actual = Estadia(
                 habitacion_id = habitacion_bd.id,
                 entrada       = fecha_entrada,
@@ -296,16 +265,15 @@ class DialogoCheckIn:
             )
             self.estadia_actual.huespedes = lista_huespedes
             sesion.add(self.estadia_actual)
-            sesion.flush()  # obtener el ID de la estadía antes del commit
+            sesion.flush()
 
-            # 5. Crear la línea de hospedaje en el folio (genera cargo en el ledger)
             config = leer_config_financiera(sesion)
             linea_hosp = folio_engine.crear_linea_hospedaje(
                 sesion,
                 estadia_id        = self.estadia_actual.id,
                 habitacion_numero = habitacion_bd.numero,
                 noches            = noches,
-                precio_noche_usd  = habitacion_bd.precio_actual_usd or habitacion_bd.precio_base_usd,
+                precio_noche_usd  = precio_noche,
                 config            = config,
                 concepto_extra    = (
                     f'Hospedaje — Hab. {habitacion_bd.numero} '
@@ -316,8 +284,6 @@ class DialogoCheckIn:
             )
             monto_total = float(linea_hosp.total_usd)
 
-            # 6. Si el titular tiene deuda de estadías anteriores (credito_usd < 0),
-            #    cargarla como línea de saldo pendiente en el folio.
             from decimal import Decimal
             titular_bd_fresco = sesion.get(Huesped, titular.id)
             credito = Decimal(str(titular_bd_fresco.credito_usd or 0)) if titular_bd_fresco else Decimal("0")
@@ -332,23 +298,18 @@ class DialogoCheckIn:
                 )
                 titular_bd_fresco.credito_usd = Decimal("0")
 
-            # Registrar evento en bitácora
-            _bita(
-                sesion     = sesion,
-                pagina     = self.pagina,
-                tipo       = TipoEvento.CHECKIN,
-                habitacion = habitacion_bd.numero,
-                concepto   = (
-                    f"Check-In — {titular.nombre_completo} · "
-                    f"{noches} noche{'s' if noches > 1 else ''} · "
-                    f"Sal. {fecha_salida.strftime('%d/%m/%Y')}"
-                ),
-                monto_usd  = monto_total,
-            )
+            # ── Guardar datos para el mensaje posterior ──────────────────────
+            self._hab_numero    = habitacion_bd.numero
+            self._monto_total   = monto_total
+            self._nombre_titular = titular.nombre_completo
+            self._noches        = noches
+            self._fecha_salida  = fecha_salida.strftime("%d/%m/%Y")
+
+            # NO registramos bitácora aquí — se registra después de saber
+            # si pagó o no (en preguntar_por_pago)
 
             sesion.commit()
             sesion.refresh(self.estadia_actual)
-
             self.total_calculado = monto_total
             self.pagina.close(self.dialogo)
             self.preguntar_por_pago()
@@ -361,14 +322,14 @@ class DialogoCheckIn:
         finally:
             sesion.close()
 
+    # ─────────────────────────────────────────────────────────────────────────
+    # DECISIÓN DE PAGO
+    # ─────────────────────────────────────────────────────────────────────────
+
     def preguntar_por_pago(self):
-        """
-        Muestra un diálogo de confirmación para decidir si cobrar
-        inmediatamente o dejar el pago pendiente.
-        """
         def ir_a_cobrar(evento):
             self.pagina.close(dialogo_confirmacion)
-            # Leer las FolioLineas pendientes de esta estadía recién creada
+
             from database.connection import SesionLocal as _SL
             from database.models import FolioLinea as _FL
             _ses = _SL()
@@ -382,17 +343,52 @@ class DialogoCheckIn:
             finally:
                 _ses.close()
 
+            # El mensaje de check-in lo registrará payment_dialog al finalizar
             modulo_pago = DialogoPago(
                 self.pagina,
                 self.estadia_actual,
                 _total or self.total_calculado,
-                al_completar = self.al_completar,
-                lineas_ids   = _ids,
+                al_completar  = self.al_completar,
+                lineas_ids    = _ids,
+                # Datos del check-in para el mensaje de bitácora
+                checkin_info  = {
+                    "habitacion":   self._hab_numero,
+                    "monto":        self._monto_total,
+                    "nombre":       self._nombre_titular,
+                    "noches":       self._noches,
+                    "fecha_salida": self._fecha_salida,
+                },
             )
             modulo_pago.mostrar()
 
         def omitir_pago(evento):
             self.pagina.close(dialogo_confirmacion)
+
+            # Registrar bitácora con estado "pendiente por cancelar"
+            sesion = SesionLocal()
+            try:
+                _bita(
+                    sesion      = sesion,
+                    pagina      = self.pagina,
+                    tipo        = TipoEvento.CHECKIN,
+                    habitacion  = self._hab_numero,
+                    concepto    = (
+                        f"Hab{self._hab_numero} ${self._monto_total:.2f} "
+                        f"pendiente por cancelar — "
+                        f"{self._nombre_titular} · "
+                        f"{self._noches} noche{'s' if self._noches > 1 else ''} · "
+                        f"Sal. {self._fecha_salida}"
+                    ),
+                    monto_usd   = self._monto_total,
+                    confirmado  = False,   # pendiente
+                )
+                sesion.commit()
+            except Exception as e:
+                sesion.rollback()
+                print(f"[CheckIn] Error al registrar bitácora omitir: {e}")
+            finally:
+                sesion.close()
+
             if self.al_completar:
                 self.al_completar()
 
@@ -400,7 +396,7 @@ class DialogoCheckIn:
             modal=True,
             title=ft.Text("Estadía Registrada"),
             content=ft.Text(
-                f"Total estimado Hab. {self.habitacion.numero}: "
+                f"Total estimado Hab. {self._hab_numero}: "
                 f"$ {self.total_calculado:.2f}\n¿Desea registrar el pago ahora?"
             ),
             actions=[
@@ -413,12 +409,15 @@ class DialogoCheckIn:
         )
         self.pagina.open(dialogo_confirmacion)
 
-    def obtener_o_crear_huesped(self, sesion, documento, nombre, apellido, es_titular: bool) -> Huesped:
-        """
-        Busca un huésped por documento. Si no existe lo crea.
-        Si es el titular, actualiza también sus datos personales completos.
-        """
-        huesped = sesion.query(Huesped).filter(Huesped.documento == documento).first()
+    # ─────────────────────────────────────────────────────────────────────────
+    # HELPERS
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def obtener_o_crear_huesped(self, sesion, documento, nombre, apellido,
+                                 es_titular: bool) -> Huesped:
+        huesped = sesion.query(Huesped).filter(
+            Huesped.documento == documento
+        ).first()
         if not huesped:
             huesped = Huesped(documento=documento, nombre=nombre, apellido=apellido)
             sesion.add(huesped)
@@ -439,7 +438,7 @@ class DialogoCheckIn:
             huesped.telefono     = self.campo_telefono.value
             huesped.vehiculo     = self.campo_vehiculo.value
 
-        sesion.flush()  # Asigna el id sin hacer commit todavía
+        sesion.flush()
         return huesped
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -469,12 +468,12 @@ class DialogoCheckIn:
                 ], scroll=ft.ScrollMode.AUTO, tight=True, spacing=15),
             ),
             actions=[
-                ft.TextButton("Cancelar", on_click=lambda _: self.pagina.close(self.dialogo)),
+                ft.TextButton("Cancelar",
+                              on_click=lambda _: self.pagina.close(self.dialogo)),
                 self.btn_guardar,
             ],
         )
 
     def mostrar(self):
-        """Construye y abre el diálogo de check-in."""
         self.dialogo = self.construir()
         self.pagina.open(self.dialogo)

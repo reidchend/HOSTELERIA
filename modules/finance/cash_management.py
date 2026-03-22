@@ -168,13 +168,16 @@ class PantallaGestionCaja(ft.Container):
     # CONSTRUCCIÓN UI
     # ─────────────────────────────────────────────────────────────────────────
 
+    # PATCH para modules/finance/cash_management.py
+# Reemplazar el método _construir() existente con este.
+# El único cambio es agregar el tercer Tab de Telegram.
+
     def _construir(self):
         datos = self._cargar_datos()
         if not datos:
             self.content = ft.Text("No se pudo cargar la información financiera.")
             return
 
-        # ── Campo tasa (referencia para actualizar) ──────────────────────────
         self._campo_tasa = ft.TextField(
             value=datos["tasa_valor"],
             suffix_text="Bs/USD",
@@ -182,6 +185,17 @@ class PantallaGestionCaja(ft.Container):
             width=160,
             dense=True,
             border_color=ft.Colors.BLUE_300,
+        )
+
+        # ── Tab de Telegram (nuevo) ───────────────────────────────────────────
+        from modules.notifications.panel_config import construir_panel_telegram
+        tab_telegram = ft.Tab(
+            text="Telegram",
+            icon=ft.Icons.SEND,
+            content=ft.Container(
+                content=construir_panel_telegram(self.pagina),
+                padding=ft.padding.only(top=20),
+            ),
         )
 
         tabs = ft.Tabs(
@@ -205,12 +219,12 @@ class PantallaGestionCaja(ft.Container):
                         padding=ft.padding.only(top=20),
                     ),
                 ),
+                tab_telegram,   # ← NUEVO
             ],
             expand=True,
         )
 
         self.content = ft.Column([
-            # Encabezado
             ft.Row([
                 ft.Column([
                     ft.Text("Panel de Administración",
@@ -218,7 +232,6 @@ class PantallaGestionCaja(ft.Container):
                     ft.Text("Finanzas en tiempo real · Configuración del hotel",
                             size=13, color=ft.Colors.GREY_600),
                 ], spacing=2, expand=True),
-                # Tasa rápida en el encabezado
                 ft.Container(
                     content=ft.Row([
                         ft.Icon(ft.Icons.CURRENCY_EXCHANGE,
