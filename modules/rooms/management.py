@@ -5,219 +5,460 @@ from database.connection import SesionLocal
 from sqlalchemy import cast, Integer
 from sqlalchemy.orm import selectinload
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PALETA POR ESTADO  —  colores premium oscuros
+# ══════════════════════════════════════════════════════════════════════════════
+
+_ESTADO_CFG = {
+    EstadoHabitacion.FREE: {
+        "label":        "DISPONIBLE",
+        "dot":          "#22C55E",   # verde esmeralda
+        "num_color":    "#F0FDF4",
+        "badge_bg":     "#14532D",
+        "badge_text":   "#86EFAC",
+        "card_border":  "#166534",
+        "card_top":     "#0F2D1A",   # gradiente arriba
+        "card_bot":     "#0A1F12",   # gradiente abajo
+        "glow":         "#22C55E",
+        "icono":        ft.Icons.KING_BED_OUTLINED,
+        "tipo_color":   "#4ADE80",
+    },
+    EstadoHabitacion.OCCUPIED: {
+        "label":        "OCUPADA",
+        "dot":          "#EF4444",
+        "num_color":    "#FFF1F1",
+        "badge_bg":     "#7F1D1D",
+        "badge_text":   "#FCA5A5",
+        "card_border":  "#991B1B",
+        "card_top":     "#2D0F0F",
+        "card_bot":     "#1F0A0A",
+        "glow":         "#EF4444",
+        "icono":        ft.Icons.PERSON_ROUNDED,
+        "tipo_color":   "#F87171",
+    },
+    EstadoHabitacion.RESERVED: {
+        "label":        "RESERVADA",
+        "dot":          "#F59E0B",
+        "num_color":    "#FFFBEB",
+        "badge_bg":     "#78350F",
+        "badge_text":   "#FCD34D",
+        "card_border":  "#92400E",
+        "card_top":     "#2D1F0A",
+        "card_bot":     "#1F1408",
+        "glow":         "#F59E0B",
+        "icono":        ft.Icons.CALENDAR_MONTH_ROUNDED,
+        "tipo_color":   "#FCD34D",
+    },
+    EstadoHabitacion.CLEANING: {
+        "label":        "LIMPIEZA",
+        "dot":          "#06B6D4",
+        "num_color":    "#ECFEFF",
+        "badge_bg":     "#164E63",
+        "badge_text":   "#67E8F9",
+        "card_border":  "#155E75",
+        "card_top":     "#0A2029",
+        "card_bot":     "#06151C",
+        "glow":         "#06B6D4",
+        "icono":        ft.Icons.CLEANING_SERVICES_ROUNDED,
+        "tipo_color":   "#22D3EE",
+    },
+    EstadoHabitacion.MAINTENANCE: {
+        "label":        "MTTO.",
+        "dot":          "#8B5CF6",
+        "num_color":    "#F5F3FF",
+        "badge_bg":     "#3B0764",
+        "badge_text":   "#C4B5FD",
+        "card_border":  "#4C1D95",
+        "card_top":     "#160D29",
+        "card_bot":     "#0E0818",
+        "glow":         "#8B5CF6",
+        "icono":        ft.Icons.BUILD_CIRCLE_OUTLINED,
+        "tipo_color":   "#A78BFA",
+    },
+}
+
+# Abreviaturas de tipo
+_TIPO_ABREV = {
+    "MATRIMONIAL": "MAT",
+    "DOBLE":       "DOB",
+    "SUITE":       "SUI",
+    "TRIPLE":      "TRI",
+    "QUINTUPLE":   "QUI",
+    "INDIVIDUAL":  "IND",
+}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# GRID DE HABITACIONES
+# ══════════════════════════════════════════════════════════════════════════════
+
 class GridHabitaciones:
     """
-    Cuadrícula visual del mapa de habitaciones con diseño moderno y minimalista.
-    Se eliminan buscadores para priorizar la limpieza visual.
+    Mapa de habitaciones con diseño premium oscuro.
+    Tarjetas con gradiente por estado, número grande, glow on-hover,
+    badge de tipo, indicadores de deuda y salida hoy.
     """
 
     def __init__(self, estado_app: dict, al_hacer_clic):
-        self.estado_app = estado_app
+        self.estado_app    = estado_app
         self.al_hacer_clic = al_hacer_clic
-        self.habitaciones_data = []
-        
-        # Grid principal con espaciado amplio
+
         self.grid = ft.GridView(
             expand=True,
-            runs_count=5,
-            max_extent=180, 
-            child_aspect_ratio=0.8,
-            spacing=20,
-            run_spacing=20,
-            padding=20,
+            runs_count=6,
+            max_extent=160,
+            child_aspect_ratio=0.78,
+            spacing=14,
+            run_spacing=14,
+            padding=ft.padding.symmetric(horizontal=24, vertical=18),
         )
 
-    def _obtener_estilos(self, habitacion):
-        """Mapeo de estilos modernos (Colores más suaves y profesionales)."""
-        estilos = {
-            EstadoHabitacion.FREE: {
-                "fondo": "#F0FDF4", # Green 50
-                "acento": "#16A34A", # Green 600
-                "texto": "#14532D",
-                "icono": ft.Icons.BED_OUTLINED, 
-                "etiqueta": "Disponible"
-            },
-            EstadoHabitacion.OCCUPIED: {
-                "fondo": "#FEF2F2", # Red 50
-                "acento": "#DC2626", # Red 600
-                "texto": "#7F1D1D",
-                "icono": ft.Icons.PERSON_ROUNDED, 
-                "etiqueta": "Ocupada"
-            },
-            EstadoHabitacion.RESERVED: {
-                "fondo": "#FFFBEB", # Amber 50
-                "acento": "#D97706", # Amber 600
-                "texto": "#78350F",
-                "icono": ft.Icons.CALENDAR_TODAY_ROUNDED, 
-                "etiqueta": "Reservada"
-            },
-            EstadoHabitacion.CLEANING: {
-                "fondo": "#ECFEFF", # Cyan 50
-                "acento": "#0891B2", # Cyan 600
-                "texto": "#164E63",
-                "icono": ft.Icons.CLEANING_SERVICES_ROUNDED, 
-                "etiqueta": "Limpieza"
-            },
-            EstadoHabitacion.MAINTENANCE: {
-                "fondo": "#F8FAFC", # Slate 50
-                "acento": "#475569", # Slate 600
-                "texto": "#0F172A",
-                "icono": ft.Icons.BUILD_CIRCLE_OUTLINED, 
-                "etiqueta": "Mtto."
-            },
-        }
-        return estilos.get(habitacion.estado, estilos[EstadoHabitacion.FREE])
+    # ─────────────────────────────────────────────────────────────────────────
+    # TARJETA INDIVIDUAL
+    # ─────────────────────────────────────────────────────────────────────────
 
-    def crear_tarjeta_habitacion(self, hab: Habitacion):
-        """Construye una tarjeta con diseño tipo 'Glassmorphism' o Card Moderno."""
-        estilo = self._obtener_estilos(hab)
-        
-        tiene_pendiente = False
-        sale_hoy = False
-        nombre_huesped = ""
+    def _tarjeta(self, hab: Habitacion) -> ft.Container:
+        cfg = _ESTADO_CFG.get(hab.estado, _ESTADO_CFG[EstadoHabitacion.FREE])
+
+        # ── Extraer info de la estadía ────────────────────────────────────────
+        tiene_deuda = False
+        sale_hoy    = False
+        nombre_h    = ""
 
         if hab.estado == EstadoHabitacion.OCCUPIED and hab.estadias_activas:
-            estadia = hab.estadias_activas[0]
-            tiene_pendiente = any(not fl.cancelada for fl in (estadia.folio_lineas or []))
-            
-            if estadia.salida:
-                salida_date = estadia.salida.date() if hasattr(estadia.salida, "date") else estadia.salida
-                sale_hoy = (salida_date == date.today())
-            
-            if estadia.huespedes:
-                nombre_huesped = estadia.huespedes[0].nombre.split()[0].title()
+            est = hab.estadias_activas[0]
+            tiene_deuda = any(not fl.cancelada for fl in (est.folio_lineas or []))
+            if est.salida:
+                salida_d = est.salida.date() if hasattr(est.salida, "date") else est.salida
+                sale_hoy = (salida_d == date.today())
+            if est.huespedes:
+                nombre_h = est.huespedes[0].nombre.split()[0].upper()
 
-        # Color especial si tiene deuda
-        borde_color = "#EAB308" if tiene_pendiente else estilo["acento"]
+        # ── Abreviatura del tipo ──────────────────────────────────────────────
+        tipo_abrev = _TIPO_ABREV.get(
+            (hab.tipo or "").upper(),
+            (hab.tipo or "???")[:3].upper()
+        )
 
-        return ft.Container(
-            content=ft.Stack([
-                ft.Column([
-                    # Header: Numero y Badge de Tipo
-                    ft.Row([
-                        ft.Text(
-                            str(hab.numero), 
-                            size=22, 
-                            weight=ft.FontWeight.BOLD, 
-                            color=ft.Colors.BLUE_GREY_900
-                        ),
-                        ft.Container(
-                            content=ft.Text(
-                                hab.tipo[:3].upper() if hab.tipo else "STD", 
-                                size=9, 
-                                weight="bold", 
-                                color=estilo["acento"]
-                            ),
-                            padding=ft.padding.symmetric(horizontal=6, vertical=2),
-                            border_radius=15,
-                            border=ft.border.all(1, estilo["acento"]),
-                        )
-                    ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+        # ── Número formateado (con cero a la izquierda) ───────────────────────
+        num_str = str(hab.numero).zfill(2)
 
-                    ft.Divider(height=1, color=ft.Colors.BLACK12),
-                    
-                    # Cuerpo central
-                    ft.Container(
-                        expand=True,
-                        alignment=ft.alignment.center,
-                        content=ft.Column([
-                            ft.Icon(
-                                estilo["icono"], 
-                                color=estilo["acento"], 
-                                size=32,
-                                opacity=0.8
-                            ),
-                            ft.Text(
-                                nombre_huesped if nombre_huesped else estilo["etiqueta"],
-                                size=12,
-                                weight=ft.FontWeight.W_500,
-                                color=ft.Colors.BLUE_GREY_700,
-                                text_align="center",
-                            ),
-                            # Indicador de Deuda / Pendiente
-                            ft.Container(
-                                content=ft.Row([
-                                    ft.Icon(ft.Icons.MONETIZATION_ON_OUTLINED, size=12, color="#854D0E"),
-                                    ft.Text("PAGO PENDIENTE", size=8, weight="bold", color="#854D0E"),
-                                ], spacing=3, alignment="center"),
-                                bgcolor="#FEF9C3",
-                                padding=ft.padding.symmetric(horizontal=8, vertical=4),
-                                border_radius=20,
-                                visible=tiene_pendiente
-                            )
-                        ], horizontal_alignment="center", spacing=8)
-                    ),
-                ], spacing=10), # Se quitó 'padding' de aquí
-                
-                # Badge "Salida Hoy" (Esquina superior derecha)
+        # ── Contenido interno de la tarjeta ───────────────────────────────────
+
+        # Fila superior: tipo + icono
+        fila_top = ft.Row(
+            controls=[
                 ft.Container(
-                    content=ft.Icon(ft.Icons.NOTIFICATION_IMPORTANT_ROUNDED, size=14, color="white"),
-                    bgcolor="#F97316",
-                    shape=ft.BoxShape.CIRCLE,
-                    padding=5,
-                    right=-5,
-                    top=-5,
-                    visible=sale_hoy,
-                    tooltip="Check-out hoy"
-                )
-            ]),
-            bgcolor=ft.Colors.WHITE,
-            padding=15, # El padding se aplica aquí, al Container que envuelve la Column
-            border_radius=16,
-            border=ft.border.all(1.5, borde_color if hab.estado != EstadoHabitacion.FREE else ft.Colors.TRANSPARENT),
+                    content=ft.Text(
+                        tipo_abrev,
+                        size=9,
+                        weight=ft.FontWeight.W_700,
+                        color=cfg["tipo_color"],
+                        font_family="Courier New",
+                    ),
+                    bgcolor=cfg["badge_bg"],
+                    padding=ft.padding.symmetric(horizontal=7, vertical=3),
+                    border_radius=20,
+                    border=ft.border.all(1, cfg["card_border"]),
+                ),
+                ft.Icon(cfg["icono"], size=15, color=cfg["tipo_color"], opacity=0.8),
+            ],
+            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+        )
+
+        # Número grande
+        numero_widget = ft.Text(
+            num_str,
+            size=42,
+            weight=ft.FontWeight.W_900,
+            color=cfg["num_color"],
+            font_family="Courier New",
+            height=52,
+        )
+
+        # Estado con dot
+        dot = ft.Container(
+            width=7, height=7,
+            bgcolor=cfg["dot"],
+            border_radius=10,
             shadow=ft.BoxShadow(
-                blur_radius=15,
+                blur_radius=8,
+                color=cfg["glow"],
                 spread_radius=1,
-                color=ft.Colors.with_opacity(0.05, ft.Colors.BLACK),
-                offset=ft.Offset(0, 5)
+            ),
+        )
+        estado_row = ft.Row(
+            controls=[
+                dot,
+                ft.Text(
+                    cfg["label"],
+                    size=8,
+                    weight=ft.FontWeight.W_700,
+                    color=cfg["dot"],
+                ),
+            ],
+            spacing=5,
+        )
+
+        # Nombre del huésped (si aplica)
+        nombre_widget = ft.Text(
+            nombre_h,
+            size=9,
+            weight=ft.FontWeight.W_600,
+            color=cfg["badge_text"],
+            opacity=0.9,
+            overflow=ft.TextOverflow.ELLIPSIS,
+        ) if nombre_h else ft.Container(height=0)
+
+        # Badge deuda
+        deuda_badge = ft.Container(
+            content=ft.Row([
+                ft.Icon(ft.Icons.ERROR_OUTLINE_ROUNDED, size=9, color="#FDE047"),
+                ft.Text("DEUDA", size=7, weight="bold", color="#FDE047"),
+            ], spacing=3),
+            bgcolor="#422006",
+            padding=ft.padding.symmetric(horizontal=6, vertical=3),
+            border_radius=20,
+            border=ft.border.all(1, "#854D0E"),
+            visible=tiene_deuda,
+        )
+
+        # Badge salida hoy
+        salida_badge = ft.Container(
+            content=ft.Row([
+                ft.Icon(ft.Icons.FLIGHT_TAKEOFF_ROUNDED, size=9, color="#FFFFFF"),
+                ft.Text("HOY", size=7, weight="bold", color="#FFFFFF"),
+            ], spacing=3),
+            bgcolor="#DC2626",
+            padding=ft.padding.symmetric(horizontal=6, vertical=3),
+            border_radius=20,
+            border=ft.border.all(1, "#EF4444"),
+            visible=sale_hoy,
+        )
+
+        # ── Columna interna ───────────────────────────────────────────────────
+        columna = ft.Column(
+            controls=[
+                fila_top,
+                numero_widget,
+                nombre_widget,
+                estado_row,
+                ft.Row(
+                    controls=[deuda_badge, salida_badge],
+                    spacing=4, wrap=True,
+                ),
+            ],
+            spacing=4,
+            expand=True,
+        )
+
+        # ── Contenedor final con gradiente ────────────────────────────────────
+        return ft.Container(
+            content=columna,
+            padding=ft.padding.all(12),
+            border_radius=16,
+            border=ft.border.all(1.5, cfg["card_border"]),
+            gradient=ft.LinearGradient(
+                begin=ft.alignment.top_left,
+                end=ft.alignment.bottom_right,
+                colors=[cfg["card_top"], cfg["card_bot"]],
+            ),
+            shadow=ft.BoxShadow(
+                blur_radius=0,
+                spread_radius=0,
+                color=ft.Colors.TRANSPARENT,
+                offset=ft.Offset(0, 0),
             ),
             on_click=lambda _: self.al_hacer_clic(hab),
-            on_hover=self._handle_hover,
-            animate_scale=ft.Animation(400, ft.AnimationCurve.EASE_OUT_BACK),
+            on_hover=self._hover,
+            animate=ft.Animation(200, ft.AnimationCurve.EASE_OUT),
             scale=1.0,
         )
 
-    def _handle_hover(self, e):
-        e.control.scale = 1.03 if e.data == "true" else 1.0
-        # Cambiamos la sombra al hacer hover para dar sensación de elevación
-        e.control.shadow = ft.BoxShadow(
-            blur_radius=25,
-            spread_radius=2,
-            color=ft.Colors.with_opacity(0.1, ft.Colors.BLACK),
-            offset=ft.Offset(0, 10)
-        ) if e.data == "true" else ft.BoxShadow(
-            blur_radius=15,
-            spread_radius=1,
-            color=ft.Colors.with_opacity(0.05, ft.Colors.BLACK),
-            offset=ft.Offset(0, 5)
-        )
-        e.control.update()
+    def _hover(self, e: ft.HoverEvent):
+        c = e.control
+        if e.data == "true":
+            c.shadow = ft.BoxShadow(
+                blur_radius=24,
+                spread_radius=2,
+                color=ft.Colors.with_opacity(0.35, "#FFFFFF"),
+                offset=ft.Offset(0, 6),
+            )
+            c.scale  = 1.04
+            c.border = ft.border.all(
+                2.0,
+                ft.Colors.with_opacity(0.7, "#FFFFFF"),
+            )
+        else:
+            # Restaurar border original
+            hab_estado = None
+            try:
+                # Leer el estado desde el gradiente (inferir cfg desde el color)
+                top = c.gradient.colors[0]
+                for est, cfg in _ESTADO_CFG.items():
+                    if cfg["card_top"] == top:
+                        hab_estado = est
+                        break
+            except Exception:
+                pass
 
-    def construir(self):
+            border_color = _ESTADO_CFG.get(
+                hab_estado, _ESTADO_CFG[EstadoHabitacion.FREE]
+            )["card_border"] if hab_estado else "#166534"
+
+            c.shadow = ft.BoxShadow(
+                blur_radius=0, spread_radius=0,
+                color=ft.Colors.TRANSPARENT,
+                offset=ft.Offset(0, 0),
+            )
+            c.scale  = 1.0
+            c.border = ft.border.all(1.5, border_color)
+        c.update()
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # LEYENDA DE ESTADOS
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _leyenda(self) -> ft.Container:
+        items = []
+        for estado, cfg in _ESTADO_CFG.items():
+            items.append(
+                ft.Row([
+                    ft.Container(
+                        width=8, height=8,
+                        bgcolor=cfg["dot"],
+                        border_radius=10,
+                    ),
+                    ft.Text(
+                        cfg["label"],
+                        size=10,
+                        color="#94A3B8",
+                        weight=ft.FontWeight.W_500,
+                    ),
+                ], spacing=6)
+            )
+
+        return ft.Container(
+            content=ft.Row(controls=items, spacing=18, wrap=True),
+            padding=ft.padding.symmetric(horizontal=24, vertical=10),
+            bgcolor="#0D1117",
+            border=ft.border.only(top=ft.border.BorderSide(1, "#1E293B")),
+        )
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # CONSTRUIR
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def construir(self) -> ft.Column:
         sesion = SesionLocal()
         try:
-            self.habitaciones_data = (
+            habs = (
                 sesion.query(Habitacion)
                 .options(
-                    selectinload(Habitacion.estadias_activas).selectinload(Estadia.huespedes),
-                    selectinload(Habitacion.estadias_activas).selectinload(Estadia.folio_lineas)
+                    selectinload(Habitacion.estadias_activas)
+                        .selectinload(Estadia.huespedes),
+                    selectinload(Habitacion.estadias_activas)
+                        .selectinload(Estadia.folio_lineas),
                 )
                 .order_by(cast(Habitacion.numero, Integer))
                 .all()
             )
-            
-            self.grid.controls = [self.crear_tarjeta_habitacion(h) for h in self.habitaciones_data]
-            
-            return ft.Container(
+
+            self.grid.controls = [self._tarjeta(h) for h in habs]
+
+            # ── Contadores por estado ─────────────────────────────────────────
+            conteos = {}
+            for h in habs:
+                conteos[h.estado] = conteos.get(h.estado, 0) + 1
+
+            chips_resumen = []
+            for estado, cfg in _ESTADO_CFG.items():
+                n = conteos.get(estado, 0)
+                chips_resumen.append(
+                    ft.Container(
+                        content=ft.Row([
+                            ft.Container(
+                                width=6, height=6,
+                                bgcolor=cfg["dot"],
+                                border_radius=10,
+                                shadow=ft.BoxShadow(
+                                    blur_radius=6,
+                                    color=cfg["glow"],
+                                    spread_radius=0,
+                                ),
+                            ),
+                            ft.Text(
+                                str(n),
+                                size=13,
+                                weight=ft.FontWeight.W_700,
+                                color="#F1F5F9",
+                            ),
+                            ft.Text(
+                                cfg["label"],
+                                size=10,
+                                color="#64748B",
+                                weight=ft.FontWeight.W_500,
+                            ),
+                        ], spacing=6),
+                        bgcolor="#0D1117",
+                        border=ft.border.all(1, "#1E293B"),
+                        border_radius=20,
+                        padding=ft.padding.symmetric(horizontal=12, vertical=7),
+                    )
+                )
+
+            # ── Barra de resumen superior ─────────────────────────────────────
+            barra_resumen = ft.Container(
+                content=ft.Row(
+                    controls=[
+                        ft.Row([
+                            ft.Icon(
+                                ft.Icons.GRID_VIEW_ROUNDED,
+                                size=14, color="#475569",
+                            ),
+                            ft.Text(
+                                f"  {len(habs)} habitaciones",
+                                size=11, color="#475569",
+                                weight=ft.FontWeight.W_500,
+                            ),
+                        ], spacing=0),
+                        ft.Container(
+                            width=1, height=18,
+                            bgcolor="#1E293B",
+                            margin=ft.margin.symmetric(horizontal=10),
+                        ),
+                        ft.Row(
+                            controls=chips_resumen,
+                            spacing=8,
+                            wrap=True,
+                        ),
+                    ],
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+                padding=ft.padding.symmetric(horizontal=24, vertical=12),
+                bgcolor="#080D14",
+                border=ft.border.only(bottom=ft.border.BorderSide(1, "#1E293B")),
+            )
+
+            # ── Contenedor del grid con fondo oscuro ──────────────────────────
+            grid_container = ft.Container(
                 content=self.grid,
                 expand=True,
-                bgcolor="#F8FAFC", 
+                bgcolor="#080D14",
             )
-            
+
+            return ft.Column(
+                controls=[barra_resumen, grid_container],
+                spacing=0,
+                expand=True,
+            )
+
         except Exception as e:
-            print(f"DEBUG ERROR GridHabitaciones: {e}")
             import traceback
             traceback.print_exc()
-            return ft.Text(f"Error al cargar mapa: {e}", color="red")
+            return ft.Column([
+                ft.Text(f"Error al cargar mapa: {e}", color="red")
+            ])
         finally:
             sesion.close()
