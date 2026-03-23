@@ -49,7 +49,7 @@ TEMAS = {
 }
 
 # Estado de tema actual (lista para mutabilidad en closures)
-_tema_actual = ["dark"]
+_tema_actual = ["light"]
 
 
 def T(clave: str):
@@ -68,7 +68,7 @@ _W_COLLAPSED = 60
 
 def principal(pagina: ft.Page):
     pagina.title       = "La Posada de Daniel C.A."
-    pagina.theme_mode  = ft.ThemeMode.DARK
+    pagina.theme_mode  = ft.ThemeMode.LIGHT
     pagina.padding     = 0
     pagina.spacing     = 0
     pagina.window.width      = 1400
