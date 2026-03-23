@@ -195,7 +195,6 @@ class Estadia(Base):
     pagos              = relationship("Pago",              back_populates="estadia", lazy="selectin")
     folio_lineas       = relationship("FolioLinea",        back_populates="estadia", lazy="selectin")
     ledger_movimientos = relationship("LedgerMovimiento",  back_populates="estadia", lazy="selectin")
-    mensaje_link       = relationship("EstadiaMessageLink", uselist=False, back_populates="estadia")
 
 
 class FolioLinea(Base):
