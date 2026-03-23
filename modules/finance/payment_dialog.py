@@ -1079,65 +1079,59 @@ class DialogoPago:
                         titular_id = titular_id,
                     )
 
-            # ── Registrar bitácora ────────────────────────────────────────────
+            # ── Registrar bitácora + Telegram ────────────────────────────────────
  
             hab_num = ""
             if estadia_bd and estadia_bd.habitacion:
                 hab_num = estadia_bd.habitacion.numero
  
-            # Construir detalle de métodos de pago para el concepto
-            def _detalle_metodos(pagos: list) -> str:
-                partes = []
-                for p in pagos:
-                    metodo_val = p["metodo"].value if hasattr(p["metodo"], "value") else str(p["metodo"])
-                    if p["metodo"] == MetodoPago.PAGO_MOVIL:
-                        tel = p.get("telefono_pm", "")
-                        ref = p.get("referencia", "")
-                        bs  = p.get("monto_bs", 0)
-                        parte = f"Pago Móvil Bs.{bs:,.2f}"
-                        if ref: parte += f" Ref:{ref}"
-                        if tel: parte += f" Tlf:{tel}"
-                        partes.append(parte)
-                    else:
-                        partes.append(metodo_val)
-                return " + ".join(partes)
- 
             if self.checkin_info:
-                # Viene de un check-in nuevo — mensaje con estado final de pago
-                ci = self.checkin_info
-                if saldo_pendiente_tx > 0.01:
-                    concepto_bita = (
-                        f"Hab{ci['habitacion']} ${ci['monto']:.2f} "
-                        f"pendiente por cancelar — "
-                        f"{ci['nombre']} · "
-                        f"{ci['noches']} noche{'s' if ci['noches'] > 1 else ''} · "
-                        f"Sal. {ci['fecha_salida']}"
-                    )
-                    confirmado_bita = False
-                else:
-                    detalle = _detalle_metodos(self.pagos_sesion)
-                    concepto_bita = (
-                        f"Hab{ci['habitacion']} ${ci['monto']:.2f} "
-                        f"cancelado por {detalle} — "
-                        f"{ci['nombre']} · "
-                        f"{ci['noches']} noche{'s' if ci['noches'] > 1 else ''} · "
-                        f"Sal. {ci['fecha_salida']}"
-                    )
-                    confirmado_bita = True
+                # Viene de un check-in nuevo → mensaje estructurado de check-in
+                ci           = self.checkin_info
+                es_pendiente = saldo_pendiente_tx > 0.01
  
+                # Bitácora interna — sin Telegram (lo enviamos con checkin_mensaje)
                 _bita(
-                    sesion      = sesion,
-                    pagina      = self.pagina,
-                    tipo        = _TE.CHECKIN,
-                    habitacion  = hab_num,
-                    concepto    = concepto_bita,
-                    monto_usd   = total_pagado_usd,
-                    monto_bs    = sum(p.get("monto_bs", 0) for p in self.pagos_sesion),
-                    metodo_pago = _detalle_metodos(self.pagos_sesion),
-                    confirmado  = confirmado_bita,
+                    sesion             = sesion,
+                    pagina             = self.pagina,
+                    tipo               = _TE.CHECKIN,
+                    habitacion         = hab_num,
+                    concepto           = (
+                        f"Hab{ci['habitacion']} ${ci['monto']:.2f} "
+                        + ("pendiente por cancelar"
+                           if es_pendiente
+                           else f"cancelado — {ci['nombre']}")
+                    ),
+                    monto_usd          = total_pagado_usd,
+                    monto_bs           = sum(p.get("monto_bs", 0) for p in self.pagos_sesion),
+                    confirmado         = not es_pendiente,
+                    notificar_telegram = False,
                 )
+ 
+                # Telegram: mensaje de check-in con formato específico
+                try:
+                    from modules.notifications.formatter import checkin_mensaje
+                    from modules.notifications.dispatcher import enviar_texto
+                    recep = (
+                        (self.pagina.session.get("usuario_activo") or {})
+                        .get("nombre_completo", "")
+                    )
+                    msg = checkin_mensaje(
+                        habitacion    = ci["habitacion"],
+                        precio_usd    = ci["monto"],
+                        nombre        = ci["nombre"],
+                        noches        = ci["noches"],
+                        fecha_salida  = ci["fecha_salida"],
+                        recepcionista = recep,
+                        pagos         = self.pagos_sesion,
+                        pendiente     = es_pendiente,
+                    )
+                    enviar_texto(msg)
+                except Exception as _e:
+                    print(f"[PaymentDialog] Error Telegram checkin: {_e}")
+ 
             else:
-                # Pago desde details.py (no es check-in nuevo)
+                # Pago desde details.py (no es check-in nuevo) → bitácora normal
                 _bita(
                     sesion      = sesion,
                     pagina      = self.pagina,

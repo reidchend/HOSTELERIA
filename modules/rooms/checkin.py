@@ -368,19 +368,17 @@ class DialogoCheckIn:
             sesion = SesionLocal()
             try:
                 _bita(
-                    sesion      = sesion,
-                    pagina      = self.pagina,
-                    tipo        = TipoEvento.CHECKIN,
-                    habitacion  = self._hab_numero,
-                    concepto    = (
+                    sesion             = sesion,
+                    pagina             = self.pagina,
+                    tipo               = TipoEvento.CHECKIN,
+                    habitacion         = self._hab_numero,
+                    concepto           = (
                         f"Hab{self._hab_numero} ${self._monto_total:.2f} "
-                        f"pendiente por cancelar — "
-                        f"{self._nombre_titular} · "
-                        f"{self._noches} noche{'s' if self._noches > 1 else ''} · "
-                        f"Sal. {self._fecha_salida}"
+                        f"pendiente por cancelar"
                     ),
-                    monto_usd   = self._monto_total,
-                    confirmado  = False,   # pendiente
+                    monto_usd          = self._monto_total,
+                    confirmado         = False,
+                    notificar_telegram = False,   # enviamos con checkin_mensaje
                 )
                 sesion.commit()
             except Exception as e:
@@ -388,6 +386,28 @@ class DialogoCheckIn:
                 print(f"[CheckIn] Error al registrar bitácora omitir: {e}")
             finally:
                 sesion.close()
+
+            # Telegram — mensaje de check-in pendiente
+            try:
+                from modules.notifications.formatter import checkin_mensaje
+                from modules.notifications.dispatcher import enviar_texto
+                recep = (
+                    (self.pagina.session.get("usuario_activo") or {})
+                    .get("nombre_completo", "")
+                )
+                msg = checkin_mensaje(
+                    habitacion    = self._hab_numero,
+                    precio_usd    = self._monto_total,
+                    nombre        = self._nombre_titular,
+                    noches        = self._noches,
+                    fecha_salida  = self._fecha_salida,
+                    recepcionista = recep,
+                    pagos         = [],     # sin pagos → pendiente
+                    pendiente     = True,
+                )
+                enviar_texto(msg)
+            except Exception as e:
+                print(f"[CheckIn] Error Telegram omitir: {e}")
 
             if self.al_completar:
                 self.al_completar()

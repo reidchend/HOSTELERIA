@@ -1,24 +1,23 @@
-# modules/notifications/formatter.py
 """
-Convierte un BitacoraEvento (o datos sueltos) en un mensaje HTML
-listo para enviar a Telegram.
+Convierte eventos en mensajes HTML para Telegram.
 
-Todos los mensajes siguen esta estructura:
-  🏨 <nombre_hotel>
-  ━━━━━━━━━━━━━━━━━━━━━
-  {EMOJI} <TIPO EN MAYÚSCULAS>
-  {líneas de detalle}
-  ⏰ HH:MM · dd/mm/aaaa
+Estructura del CHECK-IN:
+  🛎 CHECK-IN  Hab[N]
+  💰 $XX.XX  ⏳ Pendiente por cancelar
+       ó
+  💰 $XX.XX  ✅ cancelado por [método(s)]
+     (Pago Móvil incluye: Bs.XXXX  Ref:0000  Tlf:04XX)
+  👤 Registrado por: [usuario]
+  🌙 X noche(s) · 📅 Sal. dd/mm/aaaa
+  ⏰ HH:MM · día dd/mm/aaaa
 """
 
 from datetime import datetime
 from database.models import TipoEvento
 
-# ── Cabecera compartida ───────────────────────────────────────────────────────
 _HOTEL = "🏨 <b>La Posada de Daniel C.A.</b>"
 _SEP   = "━━━━━━━━━━━━━━━━━━━━━"
 
-# ── Config visual por TipoEvento ─────────────────────────────────────────────
 _CFG = {
     TipoEvento.CHECKIN:     ("🛎",  "CHECK-IN"),
     TipoEvento.CHECKOUT:    ("🚪",  "CHECK-OUT"),
@@ -39,11 +38,6 @@ def _hora() -> str:
     return f"⏰ {ahora.strftime('%H:%M')} · {dias[ahora.weekday()]} {ahora.strftime('%d/%m/%Y')}"
 
 
-def _cab(tipo: TipoEvento) -> str:
-    emoji, etiq = _CFG.get(tipo, ("🔔", str(tipo.value).upper()))
-    return f"{emoji} <b>{etiq}</b>"
-
-
 def _linea(icono: str, label: str, valor) -> str:
     if not valor and valor != 0:
         return ""
@@ -62,7 +56,161 @@ def _monto(monto_usd: float, monto_bs: float = 0, tasa: float = 0) -> str:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# APERTURA / CIERRE DE TURNO  (datos directos, no BitacoraEvento)
+# FORMATEADOR DE MÉTODOS DE PAGO  (para CHECK-IN)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _nombre_metodo(metodo) -> str:
+    """Normaliza el método a string limpio."""
+    if hasattr(metodo, "value"):
+        return metodo.value
+    return str(metodo).strip()
+
+
+def _linea_metodo(p: dict) -> str:
+    """
+    Genera la línea de texto de un método de pago.
+    Pago Móvil incluye Bs, Ref y Tlf.
+    Transferencia incluye Bs y Ref.
+    Zelle/Débito incluye USD y Ref.
+    Efectivo muestra monto en la moneda correspondiente.
+    """
+    metodo = _nombre_metodo(p.get("metodo", "")).lower()
+    usd    = p.get("monto_usd", 0) or 0
+    bs     = p.get("monto_bs",  0) or 0
+    ref    = (p.get("referencia", "") or "").strip()
+    tlf    = (p.get("telefono_pm", "") or "").strip()
+
+    if "pago móvil" in metodo or "pago movil" in metodo:
+        txt = f"📱 Pago Móvil  Bs.{bs:,.2f}"
+        if ref: txt += f"  Ref:{ref}"
+        if tlf: txt += f"  Tlf:{tlf}"
+        return txt
+
+    if "transferencia" in metodo:
+        txt = f"🏦 Transferencia  Bs.{bs:,.2f}"
+        if ref: txt += f"  Ref:{ref}"
+        return txt
+
+    if "zelle" in metodo:
+        txt = f"💸 Zelle  ${usd:,.2f}"
+        if ref: txt += f"  Ref:{ref}"
+        return txt
+
+    if "pix" in metodo:
+        txt = f"💸 Pix  ${usd:,.2f}"
+        if ref: txt += f"  Ref:{ref}"
+        return txt
+
+    if "reais" in metodo or "real" in metodo:
+        txt = f"💸 Reais  ${usd:,.2f}"
+        if ref: txt += f"  Ref:{ref}"
+        return txt
+
+    if "efectivo $" in metodo or metodo == "efectivo $":
+        return f"💵 Efectivo $  ${usd:,.2f}"
+
+    if "efectivo bs" in metodo:
+        return f"💵 Efectivo Bs  Bs.{bs:,.2f}"
+
+    if "débito" in metodo or "debito" in metodo:
+        txt = f"💳 Tarjeta Débito  ${usd:,.2f}"
+        if ref: txt += f"  Ref:{ref}"
+        return txt
+
+    if "saldo" in metodo:
+        return f"🏧 Saldo a favor  ${usd:,.2f}"
+
+    # Genérico
+    return f"💰 {_nombre_metodo(p.get('metodo', ''))}  ${usd:,.2f}"
+
+
+def _formatear_metodos(pagos: list) -> str:
+    """
+    Convierte lista de pagos en texto para el mensaje.
+    Un método: inline. Varios métodos: uno por línea indentada.
+    """
+    if not pagos:
+        return "—"
+    lineas = [_linea_metodo(p) for p in pagos]
+    if len(lineas) == 1:
+        return lineas[0]
+    # Múltiples métodos: cada uno en su propia línea indentada
+    return "\n   " + "\n   ".join(lineas)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CHECK-IN — formateador principal
+# ══════════════════════════════════════════════════════════════════════════════
+
+def checkin_mensaje(
+    habitacion:    str,
+    precio_usd:    float,
+    nombre:        str,
+    noches:        int,
+    fecha_salida:  str,
+    recepcionista: str,
+    pagos:         list,
+    pendiente:     bool,
+) -> str:
+    """
+    Genera el mensaje de Telegram para un check-in con todos sus escenarios:
+
+    • Pago parcial:
+        💰 $30.00  ✅ cancelado por
+           💸 Zelle  $15.00 Ref:ZEL123
+        ⏳ Pendiente por cancelar $15.00
+
+    • pendiente=True  (omitió pago o pago parcial, sin pagos):
+        💰 $30.00  ⏳ Pendiente por cancelar
+
+    • pendiente=False (pagó completo):
+        💰 $30.00  ✅ cancelado por 📱 Pago Móvil  Bs.1,100.00  Ref:8624  Tlf:04141234567
+        ó con múltiples métodos:
+        💰 $30.00  ✅ cancelado por
+           💵 Efectivo $  $15.00
+           💸 Zelle  $15.00  Ref:ABC123
+    """
+    lineas = [
+        _HOTEL,
+        _SEP,
+        f"🛎 <b>CHECK-IN  Hab{habitacion}</b>",
+    ]
+
+    pagos_hechos = pagos if pagos else []
+    total_abonado = sum(p.get("monto_usd", 0) for p in pagos_hechos)
+    saldo_pendiente = precio_usd - total_abonado
+
+    if pagos_hechos and saldo_pendiente > 0.01:
+        metodos_txt = _formatear_metodos(pagos_hechos)
+        if len(pagos_hechos) == 1:
+            lineas.append(f"💰 <b>${precio_usd:,.2f}</b>  ✅ cancelado por {metodos_txt}")
+        else:
+            lineas.append(f"💰 <b>${precio_usd:,.2f}</b>  ✅ cancelado por\n   {metodos_txt.strip()}")
+        lineas.append(f"⏳ Pendiente por cancelar ${saldo_pendiente:,.2f}")
+    elif pendiente or not pagos_hechos:
+        lineas.append(f"💰 <b>${precio_usd:,.2f}</b>  ⏳ Pendiente por cancelar")
+    else:
+        metodos_txt = _formatear_metodos(pagos_hechos)
+        if len(pagos_hechos) == 1:
+            lineas.append(f"💰 <b>${precio_usd:,.2f}</b>  ✅ cancelado por {metodos_txt}")
+        else:
+            lineas.append(f"💰 <b>${precio_usd:,.2f}</b>  ✅ cancelado por\n   {metodos_txt.strip()}")
+
+    # Huésped, recepcionista y estadía
+    if nombre:
+        lineas.append(_linea("👤", "Huésped", nombre))
+    if recepcionista:
+        lineas.append(_linea("🧑‍💼", "Registrado por", recepcionista))
+    lineas.append(
+        f"🌙 {noches} noche{'s' if noches != 1 else ''}  ·  📅 Sal. {fecha_salida}"
+    )
+    lineas.append(_hora())
+
+    return "\n".join(filter(None, lineas))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# APERTURA / CIERRE DE TURNO
 # ══════════════════════════════════════════════════════════════════════════════
 
 def apertura_turno(
@@ -108,35 +256,35 @@ def cierre_turno(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# FORMATEADOR GENÉRICO  (para BitacoraEvento)
+# FORMATEADOR GENÉRICO  (todos los eventos excepto CHECKIN)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def desde_evento(evento, tasa: float = 0) -> str:
     """
-    Recibe un objeto BitacoraEvento (o dict con los mismos campos)
-    y devuelve el texto HTML para Telegram.
+    Recibe un BitacoraEvento (ORM o dict) y devuelve el texto HTML.
+    Los eventos CHECKIN los maneja checkin_mensaje() — este formatter
+    solo muestra el concepto ya construido.
     """
-    # Soporte para dict y objeto ORM
     def _get(attr, default=""):
         if isinstance(evento, dict):
             return evento.get(attr, default)
         return getattr(evento, attr, default)
 
-    tipo        = _get("tipo")
-    habitacion  = _get("habitacion", "")
-    concepto    = _get("concepto", "")
-    monto_usd   = float(_get("monto_usd") or 0)
-    monto_bs    = float(_get("monto_bs")  or 0)
-    metodo      = _get("metodo_pago", "")
-    referencia  = _get("referencia", "")
-    recep       = _get("recepcionista", "")
-    confirmado  = _get("confirmado", True)
+    tipo       = _get("tipo")
+    habitacion = _get("habitacion", "")
+    concepto   = _get("concepto", "")
+    monto_usd  = float(_get("monto_usd") or 0)
+    monto_bs   = float(_get("monto_bs")  or 0)
+    metodo     = _get("metodo_pago", "")
+    referencia = _get("referencia", "")
+    recep      = _get("recepcionista", "")
+    confirmado = _get("confirmado", True)
 
     emoji, etiq = _CFG.get(tipo, ("🔔", str(tipo.value).upper() if tipo else "EVENTO"))
 
     lineas = [_HOTEL, _SEP, f"{emoji} <b>{etiq}</b>"]
 
-    # CHECKIN: el concepto ya incluye "HabX $XX.XX..." — no repetir habitación
+    # Para CHECKIN el concepto ya incluye Hab+precio+estado — no repetir habitación
     if habitacion and tipo != TipoEvento.CHECKIN:
         lineas.append(_linea("🛏", "Habitación", f"N° {habitacion}"))
 
@@ -164,30 +312,8 @@ def desde_evento(evento, tasa: float = 0) -> str:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# FORMATEADORES ESPECÍFICOS  (más contexto que el genérico)
+# OTROS FORMATEADORES ESPECÍFICOS
 # ══════════════════════════════════════════════════════════════════════════════
-
-def checkin(
-    habitacion: str,
-    nombre_huesped: str,
-    noches: int,
-    fecha_salida: str,
-    total_usd: float,
-    tasa: float,
-    recepcionista: str = "",
-) -> str:
-    return "\n".join(filter(None, [
-        _HOTEL, _SEP,
-        "🛎 <b>CHECK-IN</b>",
-        _linea("🛏", "Habitación",  f"N° {habitacion}"),
-        _linea("👤", "Huésped",     nombre_huesped),
-        _linea("🌙", "Noches",      str(noches)),
-        _linea("📅", "Salida est.", fecha_salida),
-        _linea("💰", "Total",       _monto(total_usd, tasa=tasa)),
-        _linea("🧑‍💼", "Recepción",  recepcionista) if recepcionista else "",
-        _hora(),
-    ]))
-
 
 def checkout(
     habitacion: str,
@@ -201,32 +327,6 @@ def checkout(
         _linea("🛏", "Habitación",  f"N° {habitacion}"),
         _linea("👤", "Huésped",     nombre_huesped),
         _linea("📊", "Balance",     estado_financiero),
-        _linea("🧑‍💼", "Recepción",  recepcionista) if recepcionista else "",
-        _hora(),
-    ]))
-
-
-def pago(
-    habitacion: str,
-    nombre_huesped: str,
-    monto_usd: float,
-    monto_bs: float,
-    metodo: str,
-    referencia: str = "",
-    recepcionista: str = "",
-    es_parcial: bool = False,
-    pendiente_usd: float = 0,
-) -> str:
-    estado = f"⚠️ Parcial — quedan ${pendiente_usd:,.2f}" if es_parcial else "✅ Completo"
-    return "\n".join(filter(None, [
-        _HOTEL, _SEP,
-        "💳 <b>PAGO REGISTRADO</b>",
-        _linea("🛏", "Habitación",  f"N° {habitacion}"),
-        _linea("👤", "Huésped",     nombre_huesped),
-        _linea("💰", "Monto",       _monto(monto_usd, monto_bs)),
-        _linea("💳", "Método",      metodo),
-        _linea("🔖", "Referencia",  referencia) if referencia else "",
-        _linea("📊", "Estado",      estado),
         _linea("🧑‍💼", "Recepción",  recepcionista) if recepcionista else "",
         _hora(),
     ]))
