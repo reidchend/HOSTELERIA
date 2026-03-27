@@ -1138,7 +1138,7 @@ class DialogoPago:
                     tipo        = _TE.PAGO,
                     habitacion  = hab_num,
                     concepto    = (
-                        f"Cobro ${self.total_a_pagar:.2f} — "
+                        f"Cuenta pendiente de ${self.total_a_pagar:.2f} — "
                         f"{'Completo' if saldo_pendiente_tx <= 0.01 else f'Parcial, quedan ${saldo_pendiente_tx:.2f}'}"
                     ),
                     monto_usd   = total_pagado_usd,
