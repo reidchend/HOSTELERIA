@@ -55,6 +55,7 @@ class DialogoDetallesHabitacion:
         self.al_actualizar_grid = al_actualizar_grid
         self.dialogo = None
         self.estadia_activa = None
+        self.ventana_flotante = None
 
         # {linea_id: (Checkbox, monto_usd)}
         self._checkboxes: dict = {}

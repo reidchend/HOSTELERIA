@@ -26,6 +26,10 @@ class DialogoCheckIn:
     Bitácora / Telegram:
       · Si omite el pago  → "Hab# $XX.XX pendiente por cancelar"
       · Si cobra ahora    → el mensaje lo registra payment_dialog al finalizar
+
+    Soporta dos modos de visualización:
+      · Modal (tradicional): mostrar()
+      · Ventana flotante: mostrar_como_ventana()
     """
 
     def __init__(self, pagina: ft.Page, habitacion: Habitacion, al_completar):
@@ -33,6 +37,7 @@ class DialogoCheckIn:
         self.habitacion = habitacion
         self.al_completar = al_completar
         self.dialogo = None
+        self.ventana_flotante = None
 
         self.controles_acompanantes = []
         self.estadia_actual = None

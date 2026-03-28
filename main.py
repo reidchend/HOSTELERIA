@@ -592,15 +592,17 @@ def principal(pagina: ft.Page):
 
     def al_abrir_turno(tasa):
         estado_app["tasa_cambio"] = tasa
+        estado_app["id_turno_actual"] = pagina.session.get("id_turno_actual")
         _construir_interfaz_app()
 
     def cerrar_sesion():
-        id_turno = estado_app.get("id_turno_actual")
+        id_turno = pagina.session.get("id_turno_actual")
         if id_turno:
 
             def al_cerrar_turno():
                 estado_app["id_turno_actual"] = None
                 estado_app["usuario_activo"] = None
+                pagina.session.remove("id_turno_actual")
                 mostrar_login()
 
             from modules.finance.shift_closing import DialogoCierreTurno

@@ -386,14 +386,15 @@ class GestorVuelto:
                 titular.credito_usd = (
                     _D(str(titular.credito_usd or 0)) + _D(str(remanente))
                 )
+                titular.credito_origen = "vuelto"
                 # Asentar en ledger como devolución pendiente (crédito)
                 led.registrar_devolucion(
                     sesion,
                     estadia_id = estadia_id,
-                    concepto   = f"Saldo a favor por vuelto parcial — ${remanente:.2f} acreditados al huésped",
+                    concepto   = f"Vuelto a favor — ${remanente:.2f} acreditados al huésped",
                     monto_usd  = _D(str(remanente)),
                     tasa       = _D(str(tasa)),
-                    referencia = "Crédito huésped",
+                    referencia = "Vuelto a favor",
                 )
 
         return remanente

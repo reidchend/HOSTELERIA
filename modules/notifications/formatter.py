@@ -200,6 +200,12 @@ def checkin_mensaje(
                 f"💰 <b>${precio_usd:,.2f}</b>  ✅ cancelado por\n   {metodos_txt.strip()}"
             )
         lineas.append(f"⏳ Pendiente por cancelar ${saldo_pendiente:,.2f}")
+    elif total_abonado > precio_usd + 0.01:
+        metodos_txt = _formatear_metodos(pagos_hechos)
+        lineas.append(
+            f"💰 <b>${precio_usd:,.2f}</b>  ✅ cancelado por {metodos_txt}"
+        )
+        lineas.append(f"🔴 Pendiente por devolver ${total_abonado - precio_usd:,.2f}")
     elif pendiente or not pagos_hechos:
         lineas.append(f"💰 <b>${precio_usd:,.2f}</b>  ⏳ Pendiente por cancelar")
     else:
@@ -321,18 +327,41 @@ def desde_evento(evento, tasa: float = 0) -> str:
 
     lineas = [_HOTEL, _SEP, f"{emoji} <b>{etiq}</b>"]
 
-    # Para CHECKIN el concepto ya incluye Hab+precio+estado — no repetir habitación
     if habitacion and tipo != TipoEvento.CHECKIN:
         lineas.append(_linea("🛏", "Habitación", f"N° {habitacion}"))
 
-    if concepto:
+    if tipo == TipoEvento.CARGO_EXTRA:
+        if concepto:
+            import re
+            match = re.search(r'\((?:saldo|vuelto) a favor \$[\d,]+\.\d{2}\)', concepto)
+            if match:
+                concepto_limpio = concepto.replace(match.group(), '').strip()
+                if concepto_limpio:
+                    lineas.append(_linea("📋", "Servicio", concepto_limpio))
+                saldo_match = re.search(r'(saldo|vuelto) a favor \$([\d,]+\.\d{2})', match.group())
+                if saldo_match:
+                    tipo_origen = saldo_match.group(1)
+                    saldo_valor = float(saldo_match.group(2).replace(',', ''))
+                    etiqueta = "vuelto a favor" if tipo_origen == "vuelto" else "saldo a favor"
+                    lineas.append(_linea("💳", f"Cubierto con {etiqueta}", f"${saldo_valor:,.2f}"))
+                    if not confirmado:
+                        restante = monto_usd - saldo_valor
+                        if restante > 0.01:
+                            lineas.append(f"⏳ <i>Pendiente por cancelar: ${restante:,.2f}</i>")
+                    else:
+                        lineas.append("✅ <b>Cancelado</b>")
+            else:
+                lineas.append(_linea("📋", "Servicio", concepto))
+                if confirmado:
+                    lineas.append("✅ <b>Cancelado</b>")
+    elif concepto:
         lineas.append(_linea("📋", "Detalle", concepto))
 
     monto_txt = _monto(monto_usd, monto_bs, tasa)
     if monto_txt:
         lineas.append(_linea("💰", "Monto", monto_txt))
 
-    if metodo:
+    if metodo and tipo != TipoEvento.CARGO_EXTRA:
         lineas.append(_linea("💳", "Método", metodo))
 
     if referencia:
@@ -341,8 +370,8 @@ def desde_evento(evento, tasa: float = 0) -> str:
     if recep:
         lineas.append(_linea("👤", "Registrado por", recep))
 
-    if not confirmado:
-        lineas.append("⏳ <i>Pendiente de confirmación</i>")
+    if not confirmado and tipo != TipoEvento.CARGO_EXTRA:
+        lineas.append("⏳ <i>Pendiente por cancelar</i>")
 
     lineas.append(_hora())
     return "\n".join(filter(None, lineas))
@@ -382,7 +411,9 @@ def cargo_extra(
     monto_usd: float,
     tasa: float,
     recepcionista: str = "",
+    confirmado: bool = False,
 ) -> str:
+    estado = "✅ Cancelado" if confirmado else "⏳ Pendiente por cancelar"
     return "\n".join(
         filter(
             None,
@@ -393,6 +424,7 @@ def cargo_extra(
                 _linea("🛏", "Habitación", f"N° {habitacion}"),
                 _linea("📋", "Concepto", concepto),
                 _linea("💰", "Monto", _monto(monto_usd, tasa=tasa)),
+                estado,
                 _linea("🧑‍💼", "Recepción", recepcionista) if recepcionista else "",
                 _hora(),
             ],
@@ -444,6 +476,7 @@ def pago_respuesta(
     recepcionista: str,
     es_respuesta: bool = False,
     lineas_detalle: list = None,
+    precio_habitacion: float = 0,
 ) -> str:
     """
     Mensaje de confirmación de pago que responde al mensaje original del check-in.
@@ -452,8 +485,11 @@ def pago_respuesta(
     agrupado con el mensaje al que responde.
 
     lineas_detalle: lista de dicts con 'concepto' y 'monto' para mostrar desglose.
+    precio_habitacion: precio total de la habitación para calcular sobrepago.
     """
     lineas_detalle = lineas_detalle or []
+    precio_real = precio_habitacion if precio_habitacion > 0 else monto_pagado
+    sobrepago = -saldo_pendiente if saldo_pendiente < -0.01 else 0
 
     if es_respuesta:
         lineas = []
@@ -470,14 +506,19 @@ def pago_respuesta(
                     lineas.append(f"   • {concepto}: ${monto:,.2f}")
                 lineas.append(f"───────────────────")
                 lineas.append(f"💰 <b>TOTAL: ${monto_pagado:,.2f}</b>")
-            else:
-                lineas.append(f"💰 ${monto_pagado:,.2f}")
-
-            lineas.append(f"💳 {metodos_txt}")
-
-            if saldo_pendiente > 0.01:
+            elif sobrepago > 0.01:
+                lineas.append(f"💰 Habitación: ${precio_real:,.2f}")
+                lineas.append(f"✅ Cancelado: ${monto_pagado:,.2f}")
+                lineas.append(f"💳 {metodos_txt}")
+                lineas.append(f"🔴 <b>Pendiente por devolver: ${sobrepago:,.2f}</b>")
+            elif saldo_pendiente > 0.01:
+                lineas.append(f"💰 Habitación: ${precio_real:,.2f}")
+                lineas.append(f"✅ Cancelado: ${monto_pagado:,.2f}")
+                lineas.append(f"💳 {metodos_txt}")
                 lineas.append(f"⏳ Pendiente: ${saldo_pendiente:,.2f}")
             else:
+                lineas.append(f"💰 ${monto_pagado:,.2f}")
+                lineas.append(f"💳 {metodos_txt}")
                 lineas.append("✅ <b>SALDADA</b>")
 
             if nombre:
@@ -490,7 +531,7 @@ def pago_respuesta(
     else:
         return checkin_mensaje(
             habitacion=habitacion,
-            precio_usd=monto_pagado,
+            precio_usd=precio_real,
             nombre=nombre,
             noches=0,
             fecha_salida="",
@@ -498,3 +539,80 @@ def pago_respuesta(
             pagos=pagos,
             pendiente=saldo_pendiente > 0.01,
         )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PAGO A CUENTA EXISTENTE (DEUDA TURNO ANTERIOR / ABONO)
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def pago_cuenta(
+    habitacion: str,
+    monto_cuenta: float,
+    monto_abonado: float,
+    pagos: list,
+    saldo_pendiente: float,
+    recepcionista: str,
+    nombre: str = "",
+    cargos_extras: list = None,
+    es_abono: bool = False,
+) -> str:
+    """
+    Mensaje para pagos a cuentas existentes (deudas de turnos anteriores, abonos).
+
+    Args:
+        habitacion: Número de habitación
+        monto_cuenta: Monto total de la cuenta pendiente
+        monto_abonado: Monto que se está pagando ahora
+        pagos: Lista de métodos de pago usados
+        saldo_pendiente: Saldo restante después del pago
+        recepcionista: Nombre del recepcionista
+        nombre: Nombre del huésped (opcional)
+        cargos_extras: Lista de dicts con 'concepto' y 'monto' de cargos extras
+        es_abono: True si es un abono parcial, False si es cancelación completa
+    """
+    lineas = [_HOTEL, _SEP]
+    metodos_txt = _formatear_metodos(pagos) if pagos else "—"
+    saldo_negativo = saldo_pendiente < -0.01
+    sobrepago = -saldo_pendiente if saldo_negativo else 0
+
+    if es_abono:
+        lineas.append(f"💳 <b>PAGO REGISTRADO</b>")
+        lineas.append(f"🛏 <b>Hab{habitacion}</b>")
+        lineas.append(f"📋 <b>Detalle:</b>")
+        lineas.append(f"   Abono ${monto_abonado:,.2f} a su cuenta")
+        lineas.append(f"   Pendiente: ${monto_cuenta:,.2f}")
+        if cargos_extras:
+            for c in cargos_extras:
+                lineas.append(f"   + {c.get('concepto', 'Servicio')}: ${c.get('monto', 0):,.2f}")
+        lineas.append(f"───────────────────")
+        lineas.append(f"✅ Cancelado: ${monto_abonado:,.2f}")
+        lineas.append(f"💳 {metodos_txt}")
+        if saldo_negativo:
+            lineas.append(f"🔴 <b>Pendiente por devolver: ${sobrepago:,.2f}</b>")
+        else:
+            lineas.append(f"⏳ Pendiente por cancelar: ${saldo_pendiente:,.2f}")
+    else:
+        lineas.append(f"💳 <b>PAGO REGISTRADO</b>")
+        lineas.append(f"🛏 <b>Hab{habitacion}</b>")
+        lineas.append(f"📋 <b>Detalle:</b>")
+        lineas.append(f"   Canceló cuenta pendiente: ${monto_cuenta:,.2f}")
+        if cargos_extras:
+            for c in cargos_extras:
+                lineas.append(f"   + {c.get('concepto', 'Servicio')}: ${c.get('monto', 0):,.2f}")
+            total_con_extras = monto_cuenta + sum(c.get('monto', 0) for c in cargos_extras)
+            lineas.append(f"───────────────────")
+            lineas.append(f"✅ Total cancelado: ${total_con_extras:,.2f}")
+        else:
+            lineas.append(f"───────────────────")
+            lineas.append(f"✅ Total cancelado: ${monto_cuenta:,.2f}")
+        lineas.append(f"💳 {metodos_txt}")
+        if saldo_negativo:
+            lineas.append(f"🔴 <b>Pendiente por devolver: ${sobrepago:,.2f}</b>")
+
+    if nombre:
+        lineas.append(_linea("👤", "Huésped", nombre))
+    lineas.append(_linea("🧑‍💼", "Recibido por", recepcionista))
+    lineas.append(_hora())
+
+    return "\n".join(filter(None, lineas))

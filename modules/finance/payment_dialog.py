@@ -1454,7 +1454,7 @@ class DialogoPago:
 
             # ── 2. Marcar líneas del folio como canceladas ────────────────────
             folio_engine.cancelar_lineas(sesion, self.lineas_ids)
-            saldo_pendiente_tx = max(0.0, round(pendiente, 2))
+            saldo_pendiente_tx = round(pendiente, 2)
 
             # ── 3. Pago parcial → nueva FolioLinea + CARGO en ledger ──────────
             if saldo_pendiente_tx > 0.01:
@@ -1486,6 +1486,7 @@ class DialogoPago:
                             titular.credito_usd = _D2(
                                 str(titular.credito_usd or 0)
                             ) + _D2(str(monto_sobrante))
+                            titular.credito_origen = "saldo"
                     pago_sob = Pago(
                         estadia_id=self.id_estadia,
                         monto_usd=monto_sobrante,
@@ -1584,6 +1585,7 @@ class DialogoPago:
                         recepcionista=recep,
                         es_respuesta=reply_to_msg_id is not None,
                         lineas_detalle=self._lineas_detalle,
+                        precio_habitacion=ci.get("monto", total_pagado_usd),
                     )
                     enviar_texto(
                         msg,
@@ -1593,7 +1595,7 @@ class DialogoPago:
                     print(f"[PaymentDialog] Error Telegram checkin: {_e}")
 
             else:
-                # Pago desde details.py (no es check-in nuevo) → bitácora normal
+                # Pago desde details.py (no es check-in nuevo) → bitácora normal + Telegram
                 _bita(
                     sesion=sesion,
                     pagina=self.pagina,
@@ -1610,6 +1612,44 @@ class DialogoPago:
                     ),
                     confirmado=saldo_pendiente_tx <= 0.01,
                 )
+
+                # Telegram — mensaje de pago a cuenta existente
+                try:
+                    from modules.notifications.formatter import pago_cuenta
+                    from modules.notifications.dispatcher import enviar_texto
+
+                    recep = (self.pagina.session.get("usuario_activo") or {}).get(
+                        "nombre_completo", ""
+                    )
+                    nombre_huesped = ""
+                    if estadia_bd and estadia_bd.huespedes:
+                        titular = sesion.get(Huesped, estadia_bd.huespedes[0].id)
+                        if titular:
+                            nombre_huesped = titular.nombre_completo
+
+                    es_abono = saldo_pendiente_tx > 0.01
+
+                    cargos_extras = [
+                        l for l in self._lineas_detalle
+                        if l.get("concepto", "").lower() not in [
+                            "hospedaje", "estadia", "habitacion", "noche"
+                        ]
+                    ]
+
+                    msg = pago_cuenta(
+                        habitacion=hab_num,
+                        monto_cuenta=self.total_a_pagar,
+                        monto_abonado=total_pagado_usd,
+                        pagos=self.pagos_sesion,
+                        saldo_pendiente=saldo_pendiente_tx,
+                        recepcionista=recep,
+                        nombre=nombre_huesped,
+                        cargos_extras=cargos_extras if cargos_extras else None,
+                        es_abono=es_abono,
+                    )
+                    enviar_texto(msg)
+                except Exception as _e:
+                    print(f"[PaymentDialog] Error Telegram pago cuenta: {_e}")
 
             sesion.commit()
             self.pagina.close(self.dialogo)

@@ -157,6 +157,7 @@ class Huesped(Base):
     telefono = Column(String(20))
     vehiculo = Column(String(100), nullable=True)
     credito_usd = Column(Numeric(12, 4), default=0)
+    credito_origen = Column(String(20), default="")
     lista_negra = Column(Boolean, default=False)
     motivo_veto = Column(String(300), nullable=True)
 
