@@ -2,7 +2,7 @@
 
 import flet as ft
 from database.connection import SesionLocal
-from database.models import Estadia
+from database.models import Estadia, Habitacion
 from modules.finance.engine import folio as folio_engine
 from modules.finance.bitacora import registrar as _bita
 from database.models import TipoEvento as _TE
@@ -21,18 +21,24 @@ class DialogoCargoExtra:
     """
 
     def __init__(self, pagina: ft.Page, estadia: Estadia, al_completar):
-        self.pagina       = pagina
-        self.estadia      = estadia
+        self.pagina = pagina
+        self.estadia = estadia
         self.al_completar = al_completar
-        self.dialogo      = None
+        self.dialogo = None
 
-        self.campo_servicio  = ft.TextField(label="Descripción del Servicio", expand=True)
-        self.campo_cantidad  = ft.TextField(
-            label="Cant.", value="1", width=70,
+        self.campo_servicio = ft.TextField(
+            label="Descripción del Servicio", expand=True
+        )
+        self.campo_cantidad = ft.TextField(
+            label="Cant.",
+            value="1",
+            width=70,
             keyboard_type=ft.KeyboardType.NUMBER,
         )
-        self.campo_monto     = ft.TextField(
-            label="Precio unitario (USD)", prefix_text="$ ", width=160,
+        self.campo_monto = ft.TextField(
+            label="Precio unitario (USD)",
+            prefix_text="$ ",
+            width=160,
             keyboard_type=ft.KeyboardType.NUMBER,
         )
 
@@ -53,23 +59,33 @@ class DialogoCargoExtra:
 
             # FolioEngine crea la línea y registra el CARGO en el ledger
             from decimal import Decimal
+
             linea = folio_engine.crear_cargo_extra(
                 sesion,
-                estadia_id          = self.estadia.id,
-                concepto            = nombre_concepto,
-                cantidad            = cantidad,
-                precio_unitario_usd = Decimal(str(precio_u)),
-                config              = config,
+                estadia_id=self.estadia.id,
+                concepto=nombre_concepto,
+                cantidad=cantidad,
+                precio_unitario_usd=Decimal(str(precio_u)),
+                config=config,
             )
 
+            # Obtener número de habitación directamente de la BD
+            hab_result = (
+                sesion.query(Habitacion.numero)
+                .filter(Habitacion.id == self.estadia.habitacion_id)
+                .scalar()
+            )
+            hab_num = hab_result if hab_result else f"Hab#{self.estadia.habitacion_id}"
+
             _bita(
-                sesion     = sesion,
-                pagina     = self.pagina,
-                tipo       = _TE.CARGO_EXTRA,
-                habitacion = str(self.estadia.id),
-                concepto   = f"Cargo extra — {nombre_concepto} x{cantidad}",
-                monto_usd  = float(linea.total_usd),
-                metodo_pago = "",
+                sesion=sesion,
+                pagina=self.pagina,
+                tipo=_TE.CARGO_EXTRA,
+                habitacion=hab_num,
+                concepto=f"Cargo extra — {nombre_concepto} x{cantidad} (pendiente por cancelar)",
+                monto_usd=float(linea.total_usd),
+                metodo_pago="",
+                confirmado=False,
             )
 
             sesion.commit()
@@ -79,26 +95,37 @@ class DialogoCargoExtra:
 
         except Exception as error:
             sesion.rollback()
-            self.pagina.open(ft.SnackBar(
-                ft.Text(f"Error al guardar: {error}"),
-                bgcolor=ft.Colors.RED_700,
-            ))
+            self.pagina.open(
+                ft.SnackBar(
+                    ft.Text(f"Error al guardar: {error}"),
+                    bgcolor=ft.Colors.RED_700,
+                )
+            )
         finally:
             sesion.close()
 
     def mostrar(self):
         self.dialogo = ft.AlertDialog(
             title=ft.Text("Registrar Consumo Adicional"),
-            content=ft.Column([
-                self.campo_servicio,
-                ft.Row([self.campo_cantidad, self.campo_monto],
-                       spacing=10, alignment=ft.MainAxisAlignment.START),
-            ], tight=True, spacing=15),
+            content=ft.Column(
+                [
+                    self.campo_servicio,
+                    ft.Row(
+                        [self.campo_cantidad, self.campo_monto],
+                        spacing=10,
+                        alignment=ft.MainAxisAlignment.START,
+                    ),
+                ],
+                tight=True,
+                spacing=15,
+            ),
             actions=[
-                ft.TextButton("Cancelar",
-                              on_click=lambda _: self.pagina.close(self.dialogo)),
+                ft.TextButton(
+                    "Cancelar", on_click=lambda _: self.pagina.close(self.dialogo)
+                ),
                 ft.ElevatedButton(
-                    "Confirmar", on_click=self.guardar_cargo,
+                    "Confirmar",
+                    on_click=self.guardar_cargo,
                     bgcolor=ft.Colors.BLUE,
                 ),
             ],

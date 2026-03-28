@@ -26,13 +26,18 @@ def _leer_credenciales_bd() -> tuple[str, str]:
     try:
         from database.connection import SesionLocal
         from database.models import Configuracion
+
         sesion = SesionLocal()
         try:
+
             def _val(clave):
-                c = sesion.query(Configuracion).filter(
-                    Configuracion.clave == clave
-                ).first()
+                c = (
+                    sesion.query(Configuracion)
+                    .filter(Configuracion.clave == clave)
+                    .first()
+                )
                 return (c.valor or "").strip() if c else ""
+
             return _val("telegram_bot_token"), _val("telegram_chat_id")
         finally:
             sesion.close()
@@ -61,35 +66,42 @@ def enviar_mensaje(
     chat_id: Optional[str] = None,
     parse_mode: str = "HTML",
     silencioso: bool = True,
-) -> bool:
+    reply_to_message_id: Optional[int] = None,
+) -> tuple[bool, Optional[int]]:
     """
     Envía un mensaje al grupo/canal de Telegram.
 
     Args:
-        texto:       Contenido del mensaje (soporta HTML básico: <b>, <i>, <code>).
-        token:       Bot token. Si None, se resuelve automáticamente.
-        chat_id:     Chat / grupo / canal. Si None, se resuelve automáticamente.
-        parse_mode:  "HTML" o "Markdown".
-        silencioso:  True = sin sonido de notificación en el cliente.
+        texto:                Contenido del mensaje (soporta HTML básico: <b>, <i>, <code>).
+        token:                Bot token. Si None, se resuelve automáticamente.
+        chat_id:              Chat / grupo / canal. Si None, se resuelve automáticamente.
+        parse_mode:           "HTML" o "Markdown".
+        silencioso:           True = sin sonido de notificación en el cliente.
+        reply_to_message_id:  ID del mensaje al que se responde (para encadenar mensajes).
 
     Returns:
-        True si el envío fue exitoso, False en caso contrario.
+        (True, message_id) si el envío fue exitoso
+        (False, None) si falló
     """
     if token is None or chat_id is None:
         tok, cid = obtener_credenciales()
-        token   = token   or tok
+        token = token or tok
         chat_id = chat_id or cid
 
     if not token or not chat_id:
-        return False  # Sin credenciales → no intentar
+        return False, None
 
-    url  = _API_BASE.format(token=token)
-    body = json.dumps({
-        "chat_id":              chat_id,
-        "text":                 texto,
-        "parse_mode":           parse_mode,
+    url = _API_BASE.format(token=token)
+    body_dict = {
+        "chat_id": chat_id,
+        "text": texto,
+        "parse_mode": parse_mode,
         "disable_notification": silencioso,
-    }).encode("utf-8")
+    }
+    if reply_to_message_id:
+        body_dict["reply_to_message_id"] = reply_to_message_id
+
+    body = json.dumps(body_dict).encode("utf-8")
 
     req = urllib.request.Request(
         url,
@@ -101,18 +113,20 @@ def enviar_mensaje(
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
             respuesta = json.loads(resp.read())
-            return respuesta.get("ok", False)
+            if respuesta.get("ok"):
+                msg_id = respuesta.get("result", {}).get("message_id")
+                return True, msg_id
+            return False, None
     except urllib.error.HTTPError as e:
-        # Leer el cuerpo del error para logging
         try:
             detalle = json.loads(e.read()).get("description", str(e))
         except Exception:
             detalle = str(e)
         print(f"[Telegram] HTTP {e.code}: {detalle}")
-        return False
+        return False, None
     except Exception as e:
         print(f"[Telegram] Error de red: {e}")
-        return False
+        return False, None
 
 
 def verificar_conexion(token: str, chat_id: str) -> tuple[bool, str]:
@@ -126,15 +140,18 @@ def verificar_conexion(token: str, chat_id: str) -> tuple[bool, str]:
     if not token or not chat_id:
         return False, "Token o Chat ID vacíos."
 
-    url  = _API_BASE.format(token=token)
-    body = json.dumps({
-        "chat_id":    chat_id,
-        "text":       "✅ <b>Conexión verificada</b>\nLa Posada de Daniel C.A. está conectada a Telegram.",
-        "parse_mode": "HTML",
-    }).encode("utf-8")
+    url = _API_BASE.format(token=token)
+    body = json.dumps(
+        {
+            "chat_id": chat_id,
+            "text": "✅ <b>Conexión verificada</b>\nLa Posada de Daniel C.A. está conectada a Telegram.",
+            "parse_mode": "HTML",
+        }
+    ).encode("utf-8")
 
     req = urllib.request.Request(
-        url, data=body,
+        url,
+        data=body,
         headers={"Content-Type": "application/json"},
         method="POST",
     )

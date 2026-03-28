@@ -4,8 +4,13 @@
 import flet as ft
 from database.connection import SesionLocal
 from database.models import (
-    Pago, Caja, MetodoPago, Estadia, Huesped,
-    FolioLinea, TipoLinea,
+    Pago,
+    Caja,
+    MetodoPago,
+    Estadia,
+    Huesped,
+    FolioLinea,
+    TipoLinea,
 )
 from modules.finance.engine import folio as folio_engine
 from modules.finance.engine import ledger as led
@@ -23,39 +28,39 @@ from database.models import TipoEvento as _TE
 CONFIGURACION_METODOS = {
     MetodoPago.CASH_USD: {
         "etiqueta": "Efectivo $",
-        "icono":    ft.Icons.ATTACH_MONEY,
-        "color":    ft.Colors.GREEN_800,
-        "es_bs":    False,
+        "icono": ft.Icons.ATTACH_MONEY,
+        "color": ft.Colors.GREEN_800,
+        "es_bs": False,
     },
     MetodoPago.CASH_BS: {
         "etiqueta": "Efectivo Bs",
-        "icono":    ft.Icons.MONEY,
-        "color":    ft.Colors.TEAL_700,
-        "es_bs":    True,
+        "icono": ft.Icons.MONEY,
+        "color": ft.Colors.TEAL_700,
+        "es_bs": True,
     },
     MetodoPago.TRANSFER_BS: {
         "etiqueta": "Transferencia",
-        "icono":    ft.Icons.SWAP_HORIZ,
-        "color":    ft.Colors.BLUE_700,
-        "es_bs":    True,
+        "icono": ft.Icons.SWAP_HORIZ,
+        "color": ft.Colors.BLUE_700,
+        "es_bs": True,
     },
     MetodoPago.PAGO_MOVIL: {
         "etiqueta": "Pago Móvil",
-        "icono":    ft.Icons.PHONE_ANDROID,
-        "color":    ft.Colors.PURPLE_700,
-        "es_bs":    True,
+        "icono": ft.Icons.PHONE_ANDROID,
+        "color": ft.Colors.PURPLE_700,
+        "es_bs": True,
     },
     MetodoPago.ZELLE: {
         "etiqueta": "Zelle",
-        "icono":    ft.Icons.SEND,
-        "color":    ft.Colors.INDIGO_700,
-        "es_bs":    False,
+        "icono": ft.Icons.SEND,
+        "color": ft.Colors.INDIGO_700,
+        "es_bs": False,
     },
     MetodoPago.DEBIT_CARD: {
         "etiqueta": "T. Débito",
-        "icono":    ft.Icons.CREDIT_CARD,
-        "color":    ft.Colors.ORANGE_700,
-        "es_bs":    False,
+        "icono": ft.Icons.CREDIT_CARD,
+        "color": ft.Colors.ORANGE_700,
+        "es_bs": False,
     },
 }
 
@@ -82,34 +87,74 @@ class DialogoPago:
       Huesped.credito_usd (opción "saldo a favor") o se entrega en físico.
     """
 
-    def __init__(self, pagina, estadia, total_a_pagar, al_completar,
-                 lineas_ids=None, checkin_info=None):
-        self.pagina        = pagina
-        self.estadia       = estadia
-        self.id_estadia    = estadia.id
+    def __init__(
+        self,
+        pagina,
+        estadia,
+        total_a_pagar,
+        al_completar,
+        lineas_ids=None,
+        checkin_info=None,
+    ):
+        self.pagina = pagina
+        self.estadia = estadia
+        self.id_estadia = estadia.id
         self.total_a_pagar = total_a_pagar
-        self.al_completar  = al_completar
-        self.lineas_ids    = lineas_ids or []
+        self.al_completar = al_completar
+        self.lineas_ids = lineas_ids or []
         # Datos del check-in para registrar el mensaje final en bitácora.
         # Si es None, el pago proviene de details.py (no de un check-in nuevo).
-        self.checkin_info  = checkin_info
-        self.dialogo       = None
- 
+        self.checkin_info = checkin_info
+        self.dialogo = None
+
         sesion = SesionLocal()
         try:
             self.config = leer_config_financiera(sesion)
             self.saldo_favor_disponible = self._leer_credito_titular(sesion)
         finally:
             sesion.close()
- 
-        self.pagos_sesion         = []
-        self.columna_saldo        = ft.Column(spacing=6)
+
+        self.pagos_sesion = []
+        self.columna_saldo = ft.Column(spacing=6)
         self.columna_pagos_sesion = ft.Column(spacing=6)
-        self.area_formulario      = ft.Column(spacing=8)
-        self.seccion_sobrante     = ft.Container(visible=False)
-        self.btn_finalizar        = None
-        self._gestor_vuelto       = None
-        self._campo_telefono_pm   = None   # referencia al campo teléfono de Pago Móvil
+        self.area_formulario = ft.Column(spacing=8)
+        self.seccion_sobrante = ft.Container(visible=False)
+        self.btn_finalizar = None
+        self._gestor_vuelto = None
+        self._campo_telefono_pm = None
+        self._lineas_detalle = self._cargar_lineas_detalle()
+
+    def _cargar_lineas_detalle(self):
+        """Carga los detalles de las líneas que se van a cobrar."""
+        if not self.lineas_ids:
+            return []
+        sesion = SesionLocal()
+        try:
+            lineas = (
+                sesion.query(FolioLinea)
+                .filter(FolioLinea.id.in_(self.lineas_ids))
+                .all()
+            )
+            return [
+                {
+                    "concepto": l.concepto or self._nombre_tipo_linea(l.tipo),
+                    "monto": float(l.total_usd),
+                }
+                for l in lineas
+            ]
+        finally:
+            sesion.close()
+
+    def _nombre_tipo_linea(self, tipo):
+        """Devuelve el nombre del tipo de línea para mostrar."""
+        from database.models import TipoLinea
+
+        nombres = {
+            TipoLinea.HOSPEDAJE: "Hospedaje",
+            TipoLinea.CARGO_EXTRA: "Cargo extra",
+            TipoLinea.SALDO_PENDIENTE: "Saldo pendiente",
+        }
+        return nombres.get(tipo, str(tipo.value if tipo else "Cobro"))
 
     def _leer_credito_titular(self, sesion):
         """Devuelve el credito_usd del titular de esta estadía."""
@@ -150,9 +195,9 @@ class DialogoPago:
             .first()
         )
         return {
-            "estadia":       estadia,
-            "habitacion":    estadia.habitacion,
-            "titular":       estadia.huespedes[0] if estadia.huespedes else None,
+            "estadia": estadia,
+            "habitacion": estadia.habitacion,
+            "titular": estadia.huespedes[0] if estadia.huespedes else None,
             "pagos_previos": [p for p in estadia.pagos if not p.es_devolucion],
         }
 
@@ -171,7 +216,7 @@ class DialogoPago:
     def construir(self):
         sesion = SesionLocal()
         try:
-            datos  = self._datos_para_panel(sesion)
+            datos = self._datos_para_panel(sesion)
             lineas = self._cargar_lineas(sesion)
         finally:
             sesion.close()
@@ -192,19 +237,24 @@ class DialogoPago:
                     content=self._panel_factura(datos, lineas),
                     width=320,
                     bgcolor=ft.Colors.GREY_50,
-                    border=ft.border.only(right=ft.border.BorderSide(1, ft.Colors.GREY_200)),
+                    border=ft.border.only(
+                        right=ft.border.BorderSide(1, ft.Colors.GREY_200)
+                    ),
                     padding=18,
                 ),
                 ft.Container(content=self._panel_cobro(), expand=True, padding=18),
             ],
-            spacing=0, expand=True,
+            spacing=0,
+            expand=True,
         )
 
         self.dialogo = ft.AlertDialog(
             title=self._encabezado(datos),
             content=ft.Container(content=cuerpo, width=880, height=540),
             actions=[
-                ft.TextButton("Cancelar", on_click=lambda _: self.pagina.close(self.dialogo)),
+                ft.TextButton(
+                    "Cancelar", on_click=lambda _: self.pagina.close(self.dialogo)
+                ),
                 self.btn_finalizar,
             ],
             actions_alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
@@ -214,23 +264,48 @@ class DialogoPago:
 
     def _encabezado(self, datos):
         titular = datos["titular"]
-        return ft.Row(controls=[
-            ft.Icon(ft.Icons.RECEIPT_LONG, color=ft.Colors.BLUE_800, size=22),
-            ft.Column(controls=[
-                ft.Text(f"Cobro — Habitación {datos['habitacion'].numero}", weight="bold", size=15),
-                ft.Text(titular.nombre_completo if titular else "Huésped", size=11, color=ft.Colors.GREY_600),
-            ], spacing=1),
-            ft.Container(expand=True),
-            ft.Container(
-                content=ft.Row(controls=[
-                    ft.Icon(ft.Icons.CURRENCY_EXCHANGE, size=13, color=ft.Colors.GREY_600),
-                    ft.Text(f"Tasa: Bs. {self.config.tasa_cambio:,.2f}", size=12, color=ft.Colors.GREY_700),
-                ], spacing=5),
-                bgcolor=ft.Colors.GREY_100,
-                padding=ft.padding.symmetric(horizontal=12, vertical=5),
-                border_radius=20,
-            ),
-        ], spacing=10)
+        return ft.Row(
+            controls=[
+                ft.Icon(ft.Icons.RECEIPT_LONG, color=ft.Colors.BLUE_800, size=22),
+                ft.Column(
+                    controls=[
+                        ft.Text(
+                            f"Cobro — Habitación {datos['habitacion'].numero}",
+                            weight="bold",
+                            size=15,
+                        ),
+                        ft.Text(
+                            titular.nombre_completo if titular else "Huésped",
+                            size=11,
+                            color=ft.Colors.GREY_600,
+                        ),
+                    ],
+                    spacing=1,
+                ),
+                ft.Container(expand=True),
+                ft.Container(
+                    content=ft.Row(
+                        controls=[
+                            ft.Icon(
+                                ft.Icons.CURRENCY_EXCHANGE,
+                                size=13,
+                                color=ft.Colors.GREY_600,
+                            ),
+                            ft.Text(
+                                f"Tasa: Bs. {self.config.tasa_cambio:,.2f}",
+                                size=12,
+                                color=ft.Colors.GREY_700,
+                            ),
+                        ],
+                        spacing=5,
+                    ),
+                    bgcolor=ft.Colors.GREY_100,
+                    padding=ft.padding.symmetric(horizontal=12, vertical=5),
+                    border_radius=20,
+                ),
+            ],
+            spacing=10,
+        )
 
     # ══════════════════════════════════════════════════════════════════════════
     # PANEL IZQUIERDO — DETALLE DE LÍNEAS
@@ -242,110 +317,308 @@ class DialogoPago:
 
         for linea in lineas:
             if linea.tipo == TipoLinea.HOSPEDAJE:
-                icono, color_ico, etiq, color_t = ft.Icons.BED_OUTLINED, ft.Colors.BLUE_700, "Hospedaje", ft.Colors.BLUE_700
+                icono, color_ico, etiq, color_t = (
+                    ft.Icons.BED_OUTLINED,
+                    ft.Colors.BLUE_700,
+                    "Hospedaje",
+                    ft.Colors.BLUE_700,
+                )
             elif linea.tipo == TipoLinea.CARGO_EXTRA:
-                icono, color_ico, etiq, color_t = ft.Icons.ROOM_SERVICE, ft.Colors.ORANGE_700, "Servicio (c/IVA)", ft.Colors.ORANGE_700
+                icono, color_ico, etiq, color_t = (
+                    ft.Icons.ROOM_SERVICE,
+                    ft.Colors.ORANGE_700,
+                    "Servicio (c/IVA)",
+                    ft.Colors.ORANGE_700,
+                )
             else:
-                icono, color_ico, etiq, color_t = ft.Icons.PENDING_ACTIONS, ft.Colors.RED_700, "Saldo pendiente", ft.Colors.RED_700
+                icono, color_ico, etiq, color_t = (
+                    ft.Icons.PENDING_ACTIONS,
+                    ft.Colors.RED_700,
+                    "Saldo pendiente",
+                    ft.Colors.RED_700,
+                )
 
-            filas_lineas.append(ft.Container(
-                content=ft.Row(controls=[
-                    ft.Icon(icono, size=14, color=color_ico),
-                    ft.Column(controls=[
-                        ft.Text(linea.concepto, size=11, color=ft.Colors.BLACK87),
-                        ft.Container(
-                            content=ft.Text(etiq, size=9, color=color_t),
-                            bgcolor=ft.Colors.with_opacity(0.1, color_t),
-                            padding=ft.padding.symmetric(horizontal=5, vertical=1),
-                            border_radius=4,
-                        ),
-                    ], spacing=2, expand=True),
-                    ft.Column(controls=[
-                        ft.Text(f"${float(linea.total_usd):.2f}", size=12, weight="bold", text_align=ft.TextAlign.RIGHT),
-                        ft.Text(f"Bs.{a_bs(float(linea.total_usd), tasa):,.0f}", size=9, color=ft.Colors.GREY_500, text_align=ft.TextAlign.RIGHT),
-                    ], spacing=1, horizontal_alignment=ft.CrossAxisAlignment.END),
-                ], spacing=8),
-                padding=ft.padding.symmetric(horizontal=8, vertical=6),
-                bgcolor=ft.Colors.WHITE, border_radius=7,
-                border=ft.border.all(1, ft.Colors.GREY_100),
-            ))
+            filas_lineas.append(
+                ft.Container(
+                    content=ft.Row(
+                        controls=[
+                            ft.Icon(icono, size=14, color=color_ico),
+                            ft.Column(
+                                controls=[
+                                    ft.Text(
+                                        linea.concepto, size=11, color=ft.Colors.BLACK87
+                                    ),
+                                    ft.Container(
+                                        content=ft.Text(etiq, size=9, color=color_t),
+                                        bgcolor=ft.Colors.with_opacity(0.1, color_t),
+                                        padding=ft.padding.symmetric(
+                                            horizontal=5, vertical=1
+                                        ),
+                                        border_radius=4,
+                                    ),
+                                ],
+                                spacing=2,
+                                expand=True,
+                            ),
+                            ft.Column(
+                                controls=[
+                                    ft.Text(
+                                        f"${float(linea.total_usd):.2f}",
+                                        size=12,
+                                        weight="bold",
+                                        text_align=ft.TextAlign.RIGHT,
+                                    ),
+                                    ft.Text(
+                                        f"Bs.{a_bs(float(linea.total_usd), tasa):,.0f}",
+                                        size=9,
+                                        color=ft.Colors.GREY_500,
+                                        text_align=ft.TextAlign.RIGHT,
+                                    ),
+                                ],
+                                spacing=1,
+                                horizontal_alignment=ft.CrossAxisAlignment.END,
+                            ),
+                        ],
+                        spacing=8,
+                    ),
+                    padding=ft.padding.symmetric(horizontal=8, vertical=6),
+                    bgcolor=ft.Colors.WHITE,
+                    border_radius=7,
+                    border=ft.border.all(1, ft.Colors.GREY_100),
+                )
+            )
 
-        tiene_hosp   = any(l.tipo == TipoLinea.HOSPEDAJE   for l in lineas)
+        tiene_hosp = any(l.tipo == TipoLinea.HOSPEDAJE for l in lineas)
         tiene_extras = any(l.tipo == TipoLinea.CARGO_EXTRA for l in lineas)
         nota_iva = []
-        if tiene_hosp:   nota_iva.append("🏨 Hospedaje: precio sin IVA")
-        if tiene_extras: nota_iva.append("🍽 Servicios: precio con IVA incluido")
+        if tiene_hosp:
+            nota_iva.append("🏨 Hospedaje: precio sin IVA")
+        if tiene_extras:
+            nota_iva.append("🍽 Servicios: precio con IVA incluido")
 
         self.columna_saldo.controls = self._filas_saldo()
 
-        return ft.Column(controls=[ft.Column(controls=[
-            ft.Text("CONCEPTOS A COBRAR", size=9, weight="bold", color=ft.Colors.BLUE_GREY_400),
-            ft.Column(controls=filas_lineas, spacing=5),
-            ft.Divider(height=1, color=ft.Colors.GREY_200),
-            ft.Column(controls=[ft.Text(n, size=9, color=ft.Colors.GREY_500, italic=True) for n in nota_iva], spacing=2) if nota_iva else ft.Container(),
-            ft.Container(
-                content=ft.Row(controls=[
-                    ft.Text("TOTAL A COBRAR:", size=13, weight="bold", expand=True),
-                    ft.Column(controls=[
-                        ft.Text(f"${self.total_a_pagar:.2f}", size=18, weight="bold", color=ft.Colors.BLUE_900),
-                        ft.Text(f"Bs. {a_bs(self.total_a_pagar, tasa):,.2f}", size=10, color=ft.Colors.GREY_600, text_align=ft.TextAlign.RIGHT),
-                    ], spacing=1, horizontal_alignment=ft.CrossAxisAlignment.END),
-                ]),
-                bgcolor=ft.Colors.BLUE_50, padding=10, border_radius=8,
-            ),
-            ft.Divider(height=1, color=ft.Colors.GREY_200),
-            self.columna_saldo,
-        ], spacing=8)], scroll=ft.ScrollMode.AUTO, spacing=10, expand=True)
+        return ft.Column(
+            controls=[
+                ft.Column(
+                    controls=[
+                        ft.Text(
+                            "CONCEPTOS A COBRAR",
+                            size=9,
+                            weight="bold",
+                            color=ft.Colors.BLUE_GREY_400,
+                        ),
+                        ft.Column(controls=filas_lineas, spacing=5),
+                        ft.Divider(height=1, color=ft.Colors.GREY_200),
+                        ft.Column(
+                            controls=[
+                                ft.Text(
+                                    n, size=9, color=ft.Colors.GREY_500, italic=True
+                                )
+                                for n in nota_iva
+                            ],
+                            spacing=2,
+                        )
+                        if nota_iva
+                        else ft.Container(),
+                        ft.Container(
+                            content=ft.Row(
+                                controls=[
+                                    ft.Text(
+                                        "TOTAL A COBRAR:",
+                                        size=13,
+                                        weight="bold",
+                                        expand=True,
+                                    ),
+                                    ft.Column(
+                                        controls=[
+                                            ft.Text(
+                                                f"${self.total_a_pagar:.2f}",
+                                                size=18,
+                                                weight="bold",
+                                                color=ft.Colors.BLUE_900,
+                                            ),
+                                            ft.Text(
+                                                f"Bs. {a_bs(self.total_a_pagar, tasa):,.2f}",
+                                                size=10,
+                                                color=ft.Colors.GREY_600,
+                                                text_align=ft.TextAlign.RIGHT,
+                                            ),
+                                        ],
+                                        spacing=1,
+                                        horizontal_alignment=ft.CrossAxisAlignment.END,
+                                    ),
+                                ]
+                            ),
+                            bgcolor=ft.Colors.BLUE_50,
+                            padding=10,
+                            border_radius=8,
+                        ),
+                        ft.Divider(height=1, color=ft.Colors.GREY_200),
+                        self.columna_saldo,
+                    ],
+                    spacing=8,
+                )
+            ],
+            scroll=ft.ScrollMode.AUTO,
+            spacing=10,
+            expand=True,
+        )
 
     def _filas_saldo(self):
         pendiente = self._pendiente()
-        abonado   = sum(p["monto_usd"] for p in self.pagos_sesion)
-        tasa      = self.config.tasa_cambio
-        filas     = []
+        abonado = sum(p["monto_usd"] for p in self.pagos_sesion)
+        tasa = self.config.tasa_cambio
+        filas = []
 
         if self.pagos_sesion:
-            filas.append(ft.Row(controls=[
-                ft.Text("Abonado ahora:", size=11, expand=True, color=ft.Colors.GREEN_700),
-                ft.Column(controls=[
-                    ft.Text(f"${abonado:.2f}", size=12, weight="bold", color=ft.Colors.GREEN_700, text_align=ft.TextAlign.RIGHT),
-                    ft.Text(f"Bs. {a_bs(abonado, tasa):,.2f}", size=10, color=ft.Colors.GREEN_600, text_align=ft.TextAlign.RIGHT),
-                ], spacing=1, horizontal_alignment=ft.CrossAxisAlignment.END),
-            ]))
+            filas.append(
+                ft.Row(
+                    controls=[
+                        ft.Text(
+                            "Abonado ahora:",
+                            size=11,
+                            expand=True,
+                            color=ft.Colors.GREEN_700,
+                        ),
+                        ft.Column(
+                            controls=[
+                                ft.Text(
+                                    f"${abonado:.2f}",
+                                    size=12,
+                                    weight="bold",
+                                    color=ft.Colors.GREEN_700,
+                                    text_align=ft.TextAlign.RIGHT,
+                                ),
+                                ft.Text(
+                                    f"Bs. {a_bs(abonado, tasa):,.2f}",
+                                    size=10,
+                                    color=ft.Colors.GREEN_600,
+                                    text_align=ft.TextAlign.RIGHT,
+                                ),
+                            ],
+                            spacing=1,
+                            horizontal_alignment=ft.CrossAxisAlignment.END,
+                        ),
+                    ]
+                )
+            )
 
         if pendiente > 0.01:
-            filas.append(ft.Container(
-                content=ft.Column(controls=[
-                    ft.Row(controls=[
-                        ft.Icon(ft.Icons.PENDING, color=ft.Colors.RED_700, size=15),
-                        ft.Text("PENDIENTE:", size=12, weight="bold", color=ft.Colors.RED_700, expand=True),
-                        ft.Text(f"${pendiente:.2f}", size=15, weight="bold", color=ft.Colors.RED_700),
-                    ]),
-                    ft.Text(f"Bs. {a_bs(pendiente, tasa):,.2f}", size=11, color=ft.Colors.RED_400, text_align=ft.TextAlign.RIGHT),
-                    ft.Text("⚠ La diferencia quedará como saldo pendiente.", size=9, color=ft.Colors.RED_400, italic=True) if self.pagos_sesion else ft.Container(),
-                ], spacing=3),
-                bgcolor=ft.Colors.RED_50, padding=10, border_radius=8,
-            ))
+            filas.append(
+                ft.Container(
+                    content=ft.Column(
+                        controls=[
+                            ft.Row(
+                                controls=[
+                                    ft.Icon(
+                                        ft.Icons.PENDING,
+                                        color=ft.Colors.RED_700,
+                                        size=15,
+                                    ),
+                                    ft.Text(
+                                        "PENDIENTE:",
+                                        size=12,
+                                        weight="bold",
+                                        color=ft.Colors.RED_700,
+                                        expand=True,
+                                    ),
+                                    ft.Text(
+                                        f"${pendiente:.2f}",
+                                        size=15,
+                                        weight="bold",
+                                        color=ft.Colors.RED_700,
+                                    ),
+                                ]
+                            ),
+                            ft.Text(
+                                f"Bs. {a_bs(pendiente, tasa):,.2f}",
+                                size=11,
+                                color=ft.Colors.RED_400,
+                                text_align=ft.TextAlign.RIGHT,
+                            ),
+                            ft.Text(
+                                "⚠ La diferencia quedará como saldo pendiente.",
+                                size=9,
+                                color=ft.Colors.RED_400,
+                                italic=True,
+                            )
+                            if self.pagos_sesion
+                            else ft.Container(),
+                        ],
+                        spacing=3,
+                    ),
+                    bgcolor=ft.Colors.RED_50,
+                    padding=10,
+                    border_radius=8,
+                )
+            )
         elif pendiente < -0.01:
             sobrante = abs(pendiente)
-            filas.append(ft.Container(
-                content=ft.Column(controls=[
-                    ft.Row(controls=[
-                        ft.Icon(ft.Icons.ARROW_CIRCLE_UP, color=ft.Colors.ORANGE_700, size=15),
-                        ft.Text("SOBRANTE:", size=12, weight="bold", color=ft.Colors.ORANGE_700, expand=True),
-                        ft.Text(f"${sobrante:.2f}", size=15, weight="bold", color=ft.Colors.ORANGE_700),
-                    ]),
-                    ft.Text(f"Bs. {a_bs(sobrante, tasa):,.2f}", size=11, color=ft.Colors.ORANGE_400, text_align=ft.TextAlign.RIGHT),
-                ], spacing=3),
-                bgcolor=ft.Colors.ORANGE_50, padding=10, border_radius=8,
-            ))
+            filas.append(
+                ft.Container(
+                    content=ft.Column(
+                        controls=[
+                            ft.Row(
+                                controls=[
+                                    ft.Icon(
+                                        ft.Icons.ARROW_CIRCLE_UP,
+                                        color=ft.Colors.ORANGE_700,
+                                        size=15,
+                                    ),
+                                    ft.Text(
+                                        "SOBRANTE:",
+                                        size=12,
+                                        weight="bold",
+                                        color=ft.Colors.ORANGE_700,
+                                        expand=True,
+                                    ),
+                                    ft.Text(
+                                        f"${sobrante:.2f}",
+                                        size=15,
+                                        weight="bold",
+                                        color=ft.Colors.ORANGE_700,
+                                    ),
+                                ]
+                            ),
+                            ft.Text(
+                                f"Bs. {a_bs(sobrante, tasa):,.2f}",
+                                size=11,
+                                color=ft.Colors.ORANGE_400,
+                                text_align=ft.TextAlign.RIGHT,
+                            ),
+                        ],
+                        spacing=3,
+                    ),
+                    bgcolor=ft.Colors.ORANGE_50,
+                    padding=10,
+                    border_radius=8,
+                )
+            )
         else:
-            filas.append(ft.Container(
-                content=ft.Row(controls=[
-                    ft.Icon(ft.Icons.CHECK_CIRCLE, color=ft.Colors.GREEN_700, size=16),
-                    ft.Text("CUENTA SALDADA", size=12, weight="bold", color=ft.Colors.GREEN_700),
-                ], spacing=6),
-                bgcolor=ft.Colors.GREEN_50, padding=10, border_radius=8,
-            ))
+            filas.append(
+                ft.Container(
+                    content=ft.Row(
+                        controls=[
+                            ft.Icon(
+                                ft.Icons.CHECK_CIRCLE,
+                                color=ft.Colors.GREEN_700,
+                                size=16,
+                            ),
+                            ft.Text(
+                                "CUENTA SALDADA",
+                                size=12,
+                                weight="bold",
+                                color=ft.Colors.GREEN_700,
+                            ),
+                        ],
+                        spacing=6,
+                    ),
+                    bgcolor=ft.Colors.GREEN_50,
+                    padding=10,
+                    border_radius=8,
+                )
+            )
         return filas
 
     # ══════════════════════════════════════════════════════════════════════════
@@ -355,14 +628,20 @@ class DialogoPago:
     def _panel_cobro(self):
         self.area_formulario.controls = [
             ft.Container(
-                content=ft.Text("← Selecciona un método para ingresar el pago", size=12, color=ft.Colors.GREY_500, italic=True),
+                content=ft.Text(
+                    "← Selecciona un método para ingresar el pago",
+                    size=12,
+                    color=ft.Colors.GREY_500,
+                    italic=True,
+                ),
                 padding=ft.padding.symmetric(vertical=12),
             )
         ]
 
         botones = [
             ft.ElevatedButton(
-                text=cfg["etiqueta"], icon=cfg["icono"],
+                text=cfg["etiqueta"],
+                icon=cfg["icono"],
                 style=ft.ButtonStyle(
                     color=cfg["color"],
                     bgcolor=ft.Colors.with_opacity(0.07, cfg["color"]),
@@ -394,27 +673,48 @@ class DialogoPago:
         btn_saldo_externo = ft.OutlinedButton(
             text="Saldo de otro huésped",
             icon=ft.Icons.PERSON_SEARCH,
-            style=ft.ButtonStyle(color=ft.Colors.TEAL_700, side=ft.BorderSide(1.2, ft.Colors.TEAL_300)),
+            style=ft.ButtonStyle(
+                color=ft.Colors.TEAL_700, side=ft.BorderSide(1.2, ft.Colors.TEAL_300)
+            ),
             height=38,
             on_click=lambda _: self._abrir_buscador_huesped_externo(),
         )
 
         return ft.Column(
             controls=[
-                ft.Text("MÉTODO DE PAGO", size=9, weight="bold", color=ft.Colors.BLUE_GREY_400),
+                ft.Text(
+                    "MÉTODO DE PAGO",
+                    size=9,
+                    weight="bold",
+                    color=ft.Colors.BLUE_GREY_400,
+                ),
                 ft.Row(controls=botones, wrap=True, spacing=8, run_spacing=8),
-                ft.Row(controls=[btn_saldo_favor, btn_saldo_externo], spacing=8, wrap=True),
+                ft.Row(
+                    controls=[btn_saldo_favor, btn_saldo_externo], spacing=8, wrap=True
+                ),
                 ft.Divider(height=1, color=ft.Colors.GREY_200),
                 self.area_formulario,
                 ft.Divider(height=1, color=ft.Colors.GREY_200),
-                ft.Row(controls=[
-                    ft.Icon(ft.Icons.RECEIPT, size=13, color=ft.Colors.BLUE_GREY_300),
-                    ft.Text("PAGOS DE ESTA SESIÓN", size=9, weight="bold", color=ft.Colors.BLUE_GREY_300),
-                ], spacing=5),
+                ft.Row(
+                    controls=[
+                        ft.Icon(
+                            ft.Icons.RECEIPT, size=13, color=ft.Colors.BLUE_GREY_300
+                        ),
+                        ft.Text(
+                            "PAGOS DE ESTA SESIÓN",
+                            size=9,
+                            weight="bold",
+                            color=ft.Colors.BLUE_GREY_300,
+                        ),
+                    ],
+                    spacing=5,
+                ),
                 self.columna_pagos_sesion,
                 self.seccion_sobrante,
             ],
-            spacing=10, scroll=ft.ScrollMode.AUTO, expand=True,
+            spacing=10,
+            scroll=ft.ScrollMode.AUTO,
+            expand=True,
         )
 
     # ══════════════════════════════════════════════════════════════════════════
@@ -422,29 +722,32 @@ class DialogoPago:
     # ══════════════════════════════════════════════════════════════════════════
 
     def seleccionar_metodo(self, metodo):
-        cfg  = CONFIGURACION_METODOS[metodo]
+        cfg = CONFIGURACION_METODOS[metodo]
         es_bs = cfg["es_bs"]
         necesita_referencia = metodo not in [MetodoPago.CASH_USD, MetodoPago.CASH_BS]
-        es_pago_movil       = metodo == MetodoPago.PAGO_MOVIL
+        es_pago_movil = metodo == MetodoPago.PAGO_MOVIL
         tasa = self.config.tasa_cambio
- 
+
         pendiente = self._pendiente()
         valor_sug = (
-            f"{a_bs(pendiente, tasa):.2f}" if (pendiente > 0 and es_bs)
+            f"{a_bs(pendiente, tasa):.2f}"
+            if (pendiente > 0 and es_bs)
             else (f"{pendiente:.2f}" if pendiente > 0 else "0.00")
         )
- 
+
         campo_monto = ft.TextField(
             label=f"Monto recibido ({'Bs.' if es_bs else 'USD'})",
             value=valor_sug,
             suffix_text="Bs." if es_bs else "USD",
             keyboard_type=ft.KeyboardType.NUMBER,
             text_align=ft.TextAlign.RIGHT,
-            autofocus=True, expand=True,
+            autofocus=True,
+            expand=True,
         )
         campo_ref = ft.TextField(
             label="Nro. Referencia / Confirmación",
-            visible=necesita_referencia, expand=True,
+            visible=necesita_referencia,
+            expand=True,
         )
         # Campo teléfono — solo para Pago Móvil
         campo_telefono = ft.TextField(
@@ -466,54 +769,72 @@ class DialogoPago:
                     return
                 campo_monto.error_text = None
                 monto_usd = a_usd(valor, tasa) if es_bs else valor
-                monto_bs  = valor if es_bs else a_bs(valor, tasa)
- 
+                monto_bs = valor if es_bs else a_bs(valor, tasa)
+
                 pago_dict = {
-                    "metodo":       metodo,
-                    "monto_usd":    monto_usd,
-                    "monto_bs":     monto_bs,
-                    "referencia":   campo_ref.value.strip() if necesita_referencia else "",
-                    "etiqueta":     cfg["etiqueta"],
-                    "color":        cfg["color"],
-                    "icono":        cfg["icono"],
+                    "metodo": metodo,
+                    "monto_usd": monto_usd,
+                    "monto_bs": monto_bs,
+                    "referencia": campo_ref.value.strip()
+                    if necesita_referencia
+                    else "",
+                    "etiqueta": cfg["etiqueta"],
+                    "color": cfg["color"],
+                    "icono": cfg["icono"],
                     "visualizacion": f"Bs. {valor:,.2f}" if es_bs else f"${valor:.2f}",
                 }
                 # Guardar teléfono dentro del dict si es Pago Móvil
                 if es_pago_movil:
                     pago_dict["telefono_pm"] = campo_telefono.value.strip()
- 
+
                 self.pagos_sesion.append(pago_dict)
                 self.refrescar_interfaz()
             except (ValueError, AttributeError):
                 campo_monto.error_text = "Número inválido"
                 campo_monto.update()
- 
+
         # Construir fila de campos según método
         if es_pago_movil:
-            fila_campos = ft.Column([
-                ft.Row([campo_monto, campo_ref], spacing=10),
-                campo_telefono,
-            ], spacing=8)
+            fila_campos = ft.Column(
+                [
+                    ft.Row([campo_monto, campo_ref], spacing=10),
+                    campo_telefono,
+                ],
+                spacing=8,
+            )
         elif necesita_referencia:
             fila_campos = ft.Row([campo_monto, campo_ref], spacing=10)
         else:
             fila_campos = ft.Row([campo_monto], spacing=10)
- 
+
         self.area_formulario.controls = [
             ft.Container(
-                content=ft.Column([
-                    ft.Row([
-                        ft.Icon(cfg["icono"], color=cfg["color"], size=18),
-                        ft.Text(cfg["etiqueta"], weight="bold",
-                                color=cfg["color"], size=13),
-                    ], spacing=6),
-                    fila_campos,
-                    ft.ElevatedButton(
-                        "+ AGREGAR PAGO",
-                        bgcolor=cfg["color"], color=ft.Colors.WHITE,
-                        on_click=agregar, expand=True, height=40,
-                    ),
-                ], spacing=10),
+                content=ft.Column(
+                    [
+                        ft.Row(
+                            [
+                                ft.Icon(cfg["icono"], color=cfg["color"], size=18),
+                                ft.Text(
+                                    cfg["etiqueta"],
+                                    weight="bold",
+                                    color=cfg["color"],
+                                    size=13,
+                                ),
+                            ],
+                            spacing=6,
+                        ),
+                        fila_campos,
+                        ft.ElevatedButton(
+                            "+ AGREGAR PAGO",
+                            bgcolor=cfg["color"],
+                            color=ft.Colors.WHITE,
+                            on_click=agregar,
+                            expand=True,
+                            height=40,
+                        ),
+                    ],
+                    spacing=10,
+                ),
                 padding=14,
                 bgcolor=ft.Colors.with_opacity(0.04, cfg["color"]),
                 border_radius=10,
@@ -526,16 +847,29 @@ class DialogoPago:
         self.columna_saldo.controls = self._filas_saldo()
         self.columna_pagos_sesion.controls = [
             ft.Container(
-                content=ft.Row(controls=[
-                    ft.Icon(p["icono"], size=14, color=p["color"]),
-                    ft.Text(p["etiqueta"], size=12, expand=True),
-                    ft.Text(p["visualizacion"], size=12, weight="bold"),
-                    ft.Text(f"  (${p['monto_usd']:.2f})", size=10, color=ft.Colors.GREY_600),
-                    ft.IconButton(ft.Icons.REMOVE_CIRCLE_OUTLINE, icon_size=15, icon_color=ft.Colors.RED_400,
-                                  tooltip="Quitar este pago", on_click=lambda _, i=idx: self.quitar_pago(i)),
-                ], spacing=4),
+                content=ft.Row(
+                    controls=[
+                        ft.Icon(p["icono"], size=14, color=p["color"]),
+                        ft.Text(p["etiqueta"], size=12, expand=True),
+                        ft.Text(p["visualizacion"], size=12, weight="bold"),
+                        ft.Text(
+                            f"  (${p['monto_usd']:.2f})",
+                            size=10,
+                            color=ft.Colors.GREY_600,
+                        ),
+                        ft.IconButton(
+                            ft.Icons.REMOVE_CIRCLE_OUTLINE,
+                            icon_size=15,
+                            icon_color=ft.Colors.RED_400,
+                            tooltip="Quitar este pago",
+                            on_click=lambda _, i=idx: self.quitar_pago(i),
+                        ),
+                    ],
+                    spacing=4,
+                ),
                 padding=ft.padding.symmetric(horizontal=10, vertical=5),
-                bgcolor=ft.Colors.with_opacity(0.06, p["color"]), border_radius=7,
+                bgcolor=ft.Colors.with_opacity(0.06, p["color"]),
+                border_radius=7,
             )
             for idx, p in enumerate(self.pagos_sesion)
         ]
@@ -543,18 +877,24 @@ class DialogoPago:
         if pendiente < -0.01:
             self._activar_gestor_vuelto(abs(pendiente))
             self.btn_finalizar.disabled = False
-            self.btn_finalizar.bgcolor  = ft.Colors.ORANGE_700
-            self.btn_finalizar.text     = "CONFIRMAR Y GESTIONAR SOBRANTE"
+            self.btn_finalizar.bgcolor = ft.Colors.ORANGE_700
+            self.btn_finalizar.text = "CONFIRMAR Y GESTIONAR SOBRANTE"
         elif self.pagos_sesion:
             self.seccion_sobrante.visible = False
-            self.btn_finalizar.disabled   = False
-            self.btn_finalizar.bgcolor    = ft.Colors.GREEN_700 if abs(pendiente) <= 0.01 else ft.Colors.BLUE_700
-            self.btn_finalizar.text       = "FINALIZAR COBRO" if abs(pendiente) <= 0.01 else f"COBRAR PARCIAL (quedan ${pendiente:.2f})"
+            self.btn_finalizar.disabled = False
+            self.btn_finalizar.bgcolor = (
+                ft.Colors.GREEN_700 if abs(pendiente) <= 0.01 else ft.Colors.BLUE_700
+            )
+            self.btn_finalizar.text = (
+                "FINALIZAR COBRO"
+                if abs(pendiente) <= 0.01
+                else f"COBRAR PARCIAL (quedan ${pendiente:.2f})"
+            )
         else:
             self.seccion_sobrante.visible = False
-            self.btn_finalizar.disabled   = True
-            self.btn_finalizar.bgcolor    = ft.Colors.GREY_400
-            self.btn_finalizar.text       = "FINALIZAR COBRO"
+            self.btn_finalizar.disabled = True
+            self.btn_finalizar.bgcolor = ft.Colors.GREY_400
+            self.btn_finalizar.text = "FINALIZAR COBRO"
         self.pagina.update()
 
     def quitar_pago(self, indice):
@@ -566,24 +906,26 @@ class DialogoPago:
     # ══════════════════════════════════════════════════════════════════════════
 
     def _aplicar_saldo_favor(self):
-        pendiente  = self._pendiente()
+        pendiente = self._pendiente()
         disponible = self.saldo_favor_disponible
         if disponible <= 0.01 or pendiente <= 0.01:
             return
         monto_aplicar = round(min(disponible, pendiente), 2)
-        tasa          = self.config.tasa_cambio
-        self.pagos_sesion.append({
-            "metodo":         MetodoPago.SALDO_FAVOR,
-            "monto_usd":      monto_aplicar,
-            "monto_bs":       a_bs(monto_aplicar, tasa),
-            "referencia":     "",
-            "etiqueta":       f"Saldo a Favor del titular (${monto_aplicar:.2f})",
-            "color":          ft.Colors.GREEN_800,
-            "icono":          ft.Icons.ACCOUNT_BALANCE_WALLET,
-            "visualizacion":  f"${monto_aplicar:.2f}",
-            "es_saldo_favor": True,
-            # Sin huesped_externo_id  →  descuenta del titular de esta estadía
-        })
+        tasa = self.config.tasa_cambio
+        self.pagos_sesion.append(
+            {
+                "metodo": MetodoPago.SALDO_FAVOR,
+                "monto_usd": monto_aplicar,
+                "monto_bs": a_bs(monto_aplicar, tasa),
+                "referencia": "",
+                "etiqueta": f"Saldo a Favor del titular (${monto_aplicar:.2f})",
+                "color": ft.Colors.GREEN_800,
+                "icono": ft.Icons.ACCOUNT_BALANCE_WALLET,
+                "visualizacion": f"${monto_aplicar:.2f}",
+                "es_saldo_favor": True,
+                # Sin huesped_externo_id  →  descuenta del titular de esta estadía
+            }
+        )
         self.saldo_favor_disponible = round(disponible - monto_aplicar, 2)
         self.refrescar_interfaz()
 
@@ -606,13 +948,16 @@ class DialogoPago:
           Vista 3 → éxito: el pago ya está en la lista, solo cerrar
         """
         contenedor = ft.Column(spacing=10, tight=True)
-        titulo_txt  = ft.Text("Saldo de otro huésped", weight="bold")
+        titulo_txt = ft.Text("Saldo de otro huésped", weight="bold")
 
         dlg = ft.AlertDialog(
-            title=ft.Row([
-                ft.Icon(ft.Icons.PERSON_SEARCH, color=ft.Colors.TEAL_700),
-                titulo_txt,
-            ], spacing=8),
+            title=ft.Row(
+                [
+                    ft.Icon(ft.Icons.PERSON_SEARCH, color=ft.Colors.TEAL_700),
+                    titulo_txt,
+                ],
+                spacing=8,
+            ),
             content=ft.Container(content=contenedor, width=460),
             actions=[],
             actions_alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
@@ -620,16 +965,16 @@ class DialogoPago:
 
         def _set_vista(controls, actions, titulo):
             """Reemplaza contenido y acciones del diálogo sin cerrarlo."""
-            titulo_txt.value     = titulo
-            contenedor.controls  = controls
-            dlg.actions          = actions
+            titulo_txt.value = titulo
+            contenedor.controls = controls
+            dlg.actions = actions
             if dlg.page:
                 dlg.update()
 
         # ══════════════════════════════════════════════════════════════════════
         # VISTA 1 — lista de huéspedes
         # ══════════════════════════════════════════════════════════════════════
-        lista_col      = ft.Column(spacing=5, scroll=ft.ScrollMode.AUTO)
+        lista_col = ft.Column(spacing=5, scroll=ft.ScrollMode.AUTO)
         campo_busqueda = ft.TextField(
             label="Filtrar por documento o nombre",
             prefix_icon=ft.Icons.SEARCH,
@@ -642,16 +987,22 @@ class DialogoPago:
                 q = sesion.query(Huesped).filter(Huesped.credito_usd > 0)
                 if termino:
                     q = q.filter(
-                        (Huesped.documento.ilike(f"%{termino}%")) |
-                        (Huesped.nombre.ilike(f"%{termino}%"))    |
-                        (Huesped.apellido.ilike(f"%{termino}%"))
+                        (Huesped.documento.ilike(f"%{termino}%"))
+                        | (Huesped.nombre.ilike(f"%{termino}%"))
+                        | (Huesped.apellido.ilike(f"%{termino}%"))
                     )
                 huespedes = q.order_by(Huesped.credito_usd.desc()).limit(30).all()
                 lista_col.controls = (
                     [_fila_huesped(h, float(h.credito_usd or 0)) for h in huespedes]
                     if huespedes
-                    else [ft.Text("Sin huéspedes con saldo a favor.",
-                                  size=12, color=ft.Colors.GREY_400, italic=True)]
+                    else [
+                        ft.Text(
+                            "Sin huéspedes con saldo a favor.",
+                            size=12,
+                            color=ft.Colors.GREY_400,
+                            italic=True,
+                        )
+                    ]
                 )
             finally:
                 sesion.close()
@@ -659,38 +1010,57 @@ class DialogoPago:
                 lista_col.update()
 
         def _fila_huesped(h, credito):
-            hid    = h.id
-            doc    = h.documento
+            hid = h.id
+            doc = h.documento
             nombre = h.nombre_completo
+
             def _ir_vista2(_):
                 mostrar_vista2(hid, doc, nombre, credito)
+
             return ft.Container(
-                content=ft.Row([
-                    ft.Column([
-                        ft.Text(nombre, size=12, weight="bold"),
-                        ft.Text(f"Doc: {doc}", size=10, color=ft.Colors.GREY_600),
-                    ], spacing=1, expand=True),
-                    ft.Container(
-                        content=ft.Text(f"${credito:.2f}", size=13,
-                                        weight="bold", color=ft.Colors.WHITE),
-                        bgcolor=ft.Colors.GREEN_700,
-                        padding=ft.padding.symmetric(horizontal=10, vertical=4),
-                        border_radius=8,
-                    ),
-                    ft.ElevatedButton(
-                        "Usar",
-                        style=ft.ButtonStyle(
-                            color=ft.Colors.TEAL_700,
-                            bgcolor=ft.Colors.with_opacity(0.08, ft.Colors.TEAL_700),
-                            side=ft.BorderSide(1, ft.Colors.TEAL_300),
-                            shape=ft.RoundedRectangleBorder(radius=6),
+                content=ft.Row(
+                    [
+                        ft.Column(
+                            [
+                                ft.Text(nombre, size=12, weight="bold"),
+                                ft.Text(
+                                    f"Doc: {doc}", size=10, color=ft.Colors.GREY_600
+                                ),
+                            ],
+                            spacing=1,
+                            expand=True,
                         ),
-                        height=32,
-                        on_click=_ir_vista2,
-                    ),
-                ], spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                        ft.Container(
+                            content=ft.Text(
+                                f"${credito:.2f}",
+                                size=13,
+                                weight="bold",
+                                color=ft.Colors.WHITE,
+                            ),
+                            bgcolor=ft.Colors.GREEN_700,
+                            padding=ft.padding.symmetric(horizontal=10, vertical=4),
+                            border_radius=8,
+                        ),
+                        ft.ElevatedButton(
+                            "Usar",
+                            style=ft.ButtonStyle(
+                                color=ft.Colors.TEAL_700,
+                                bgcolor=ft.Colors.with_opacity(
+                                    0.08, ft.Colors.TEAL_700
+                                ),
+                                side=ft.BorderSide(1, ft.Colors.TEAL_300),
+                                shape=ft.RoundedRectangleBorder(radius=6),
+                            ),
+                            height=32,
+                            on_click=_ir_vista2,
+                        ),
+                    ],
+                    spacing=8,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
                 padding=ft.padding.symmetric(horizontal=10, vertical=7),
-                bgcolor=ft.Colors.WHITE, border_radius=8,
+                bgcolor=ft.Colors.WHITE,
+                border_radius=8,
                 border=ft.border.all(1, ft.Colors.GREY_100),
             )
 
@@ -700,9 +1070,11 @@ class DialogoPago:
                 controls=[
                     campo_busqueda,
                     ft.Container(
-                        content=lista_col, height=260,
+                        content=lista_col,
+                        height=260,
                         border=ft.border.all(1, ft.Colors.GREY_200),
-                        border_radius=8, padding=8,
+                        border_radius=8,
+                        padding=8,
                     ),
                 ],
                 actions=[
@@ -718,8 +1090,8 @@ class DialogoPago:
         # VISTA 2 — confirmar monto
         # ══════════════════════════════════════════════════════════════════════
         def mostrar_vista2(hid, doc, nombre, credito):
-            pendiente   = self._pendiente()
-            monto_sug   = round(min(credito, max(pendiente, 0.0)), 2)
+            pendiente = self._pendiente()
+            monto_sug = round(min(credito, max(pendiente, 0.0)), 2)
             campo_monto = ft.TextField(
                 label="Monto a aplicar",
                 value=f"{monto_sug:.2f}",
@@ -733,8 +1105,13 @@ class DialogoPago:
             def _aplicar(_):
                 # Parsear el valor limpiando cualquier símbolo residual
                 try:
-                    limpio = (campo_monto.value or "").replace("$","").replace(",",".").strip()
-                    monto  = round(float(limpio), 2)
+                    limpio = (
+                        (campo_monto.value or "")
+                        .replace("$", "")
+                        .replace(",", ".")
+                        .strip()
+                    )
+                    monto = round(float(limpio), 2)
                 except (ValueError, AttributeError):
                     error_txt.value = "Número inválido"
                     error_txt.update()
@@ -750,20 +1127,22 @@ class DialogoPago:
                     return
 
                 tasa = self.config.tasa_cambio
-                self.pagos_sesion.append({
-                    "metodo":                 MetodoPago.SALDO_FAVOR,
-                    "monto_usd":              monto,
-                    "monto_bs":               a_bs(monto, tasa),
-                    "referencia":             "",
-                    "etiqueta":               f"Saldo de {nombre} (${monto:.2f})",
-                    "color":                  ft.Colors.TEAL_700,
-                    "icono":                  ft.Icons.PERSON_PIN,
-                    "visualizacion":          f"${monto:.2f}",
-                    "es_saldo_favor":         True,
-                    "huesped_externo_id":     hid,
-                    "huesped_externo_nombre": nombre,
-                    "huesped_externo_doc":    doc,
-                })
+                self.pagos_sesion.append(
+                    {
+                        "metodo": MetodoPago.SALDO_FAVOR,
+                        "monto_usd": monto,
+                        "monto_bs": a_bs(monto, tasa),
+                        "referencia": "",
+                        "etiqueta": f"Saldo de {nombre} (${monto:.2f})",
+                        "color": ft.Colors.TEAL_700,
+                        "icono": ft.Icons.PERSON_PIN,
+                        "visualizacion": f"${monto:.2f}",
+                        "es_saldo_favor": True,
+                        "huesped_externo_id": hid,
+                        "huesped_externo_nombre": nombre,
+                        "huesped_externo_doc": doc,
+                    }
+                )
 
                 # Actualizar el panel de pagos ANTES de tocar este diálogo
                 self.refrescar_interfaz()
@@ -775,24 +1154,46 @@ class DialogoPago:
             _set_vista(
                 controls=[
                     ft.Container(
-                        content=ft.Column([
-                            ft.Row([
-                                ft.Icon(ft.Icons.PERSON, color=ft.Colors.TEAL_700, size=16),
-                                ft.Text(nombre, size=13, weight="bold"),
-                            ], spacing=6),
-                            ft.Text(f"Documento: {doc}", size=11, color=ft.Colors.GREY_600),
-                            ft.Text(f"Crédito disponible: ${credito:.2f}",
-                                    size=12, color=ft.Colors.GREEN_700, weight="bold"),
-                            ft.Divider(height=6),
-                            campo_monto,
-                            error_txt,
-                        ], spacing=8),
-                        bgcolor=ft.Colors.TEAL_50, padding=14, border_radius=10,
+                        content=ft.Column(
+                            [
+                                ft.Row(
+                                    [
+                                        ft.Icon(
+                                            ft.Icons.PERSON,
+                                            color=ft.Colors.TEAL_700,
+                                            size=16,
+                                        ),
+                                        ft.Text(nombre, size=13, weight="bold"),
+                                    ],
+                                    spacing=6,
+                                ),
+                                ft.Text(
+                                    f"Documento: {doc}",
+                                    size=11,
+                                    color=ft.Colors.GREY_600,
+                                ),
+                                ft.Text(
+                                    f"Crédito disponible: ${credito:.2f}",
+                                    size=12,
+                                    color=ft.Colors.GREEN_700,
+                                    weight="bold",
+                                ),
+                                ft.Divider(height=6),
+                                campo_monto,
+                                error_txt,
+                            ],
+                            spacing=8,
+                        ),
+                        bgcolor=ft.Colors.TEAL_50,
+                        padding=14,
+                        border_radius=10,
                         border=ft.border.all(1, ft.Colors.TEAL_100),
                     ),
                 ],
                 actions=[
-                    ft.TextButton("← Volver", on_click=lambda _: (mostrar_vista1(), _cargar())),
+                    ft.TextButton(
+                        "← Volver", on_click=lambda _: (mostrar_vista1(), _cargar())
+                    ),
                     ft.ElevatedButton(
                         "Aplicar saldo",
                         icon=ft.Icons.CHECK,
@@ -813,23 +1214,42 @@ class DialogoPago:
                 msg = f"Quedan ${pendiente_restante:.2f} por cobrar. Puedes agregar otro metodo de pago."
                 color_msg = ft.Colors.BLUE_700
             else:
-                msg   = "La cuenta ha quedado saldada."
+                msg = "La cuenta ha quedado saldada."
                 color_msg = ft.Colors.GREEN_700
 
             _set_vista(
                 controls=[
                     ft.Container(
-                        content=ft.Column([
-                            ft.Row([
-                                ft.Icon(ft.Icons.CHECK_CIRCLE, color=ft.Colors.GREEN_700, size=28),
-                                ft.Text("Saldo aplicado", size=16, weight="bold",
-                                        color=ft.Colors.GREEN_700),
-                            ], spacing=10),
-                            ft.Text(f"Se aplicaron ${monto:.2f} del crédito de {nombre}.",
-                                    size=12),
-                            ft.Text(msg, size=12, color=color_msg),
-                        ], spacing=10, horizontal_alignment=ft.CrossAxisAlignment.CENTER),
-                        bgcolor=ft.Colors.GREEN_50, padding=20, border_radius=10,
+                        content=ft.Column(
+                            [
+                                ft.Row(
+                                    [
+                                        ft.Icon(
+                                            ft.Icons.CHECK_CIRCLE,
+                                            color=ft.Colors.GREEN_700,
+                                            size=28,
+                                        ),
+                                        ft.Text(
+                                            "Saldo aplicado",
+                                            size=16,
+                                            weight="bold",
+                                            color=ft.Colors.GREEN_700,
+                                        ),
+                                    ],
+                                    spacing=10,
+                                ),
+                                ft.Text(
+                                    f"Se aplicaron ${monto:.2f} del crédito de {nombre}.",
+                                    size=12,
+                                ),
+                                ft.Text(msg, size=12, color=color_msg),
+                            ],
+                            spacing=10,
+                            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                        ),
+                        bgcolor=ft.Colors.GREEN_50,
+                        padding=20,
+                        border_radius=10,
                         border=ft.border.all(1, ft.Colors.GREEN_200),
                         alignment=ft.alignment.center,
                     ),
@@ -851,7 +1271,6 @@ class DialogoPago:
         mostrar_vista1()
         self.pagina.open(dlg)
 
-
     def _activar_gestor_vuelto(self, sobrante_usd):
         """
         Crea/actualiza el GestorVuelto inline y lo muestra en seccion_sobrante.
@@ -860,7 +1279,10 @@ class DialogoPago:
         tasa = self.config.tasa_cambio
 
         # Recrear solo si el monto cambió para no perder lo que el usuario ingresó
-        if self._gestor_vuelto is None or abs(self._gestor_vuelto.monto_usd - sobrante_usd) > 0.01:
+        if (
+            self._gestor_vuelto is None
+            or abs(self._gestor_vuelto.monto_usd - sobrante_usd) > 0.01
+        ):
             self._gestor_vuelto = GestorVuelto(
                 monto_usd=sobrante_usd,
                 tasa=tasa,
@@ -870,13 +1292,15 @@ class DialogoPago:
         # Opción de crédito vs vuelto físico
         sobrante_bs = a_bs(sobrante_usd, tasa)
         radio = ft.RadioGroup(
-            content=ft.Column(controls=[
-                ft.Radio(
-                    value="credito",
-                    label=f"Dejar ${sobrante_usd:.2f} como saldo a favor del huésped  (Bs. {sobrante_bs:,.2f})",
-                ),
-                ft.Radio(value="vuelto", label="Entregar vuelto ahora"),
-            ]),
+            content=ft.Column(
+                controls=[
+                    ft.Radio(
+                        value="credito",
+                        label=f"Dejar ${sobrante_usd:.2f} como saldo a favor del huésped  (Bs. {sobrante_bs:,.2f})",
+                    ),
+                    ft.Radio(value="vuelto", label="Entregar vuelto ahora"),
+                ]
+            ),
             value=getattr(self, "_radio_sobrante_valor", "credito"),
         )
         self._radio_sobrante = radio
@@ -887,25 +1311,39 @@ class DialogoPago:
 
         def cambiar_modo(_):
             self._radio_sobrante_valor = radio.value
-            panel_gestor.visible = (radio.value == "vuelto")
+            panel_gestor.visible = radio.value == "vuelto"
             self.pagina.update()
 
         radio.on_change = cambiar_modo
 
         self.seccion_sobrante.visible = True
         self.seccion_sobrante.content = ft.Container(
-            content=ft.Column(controls=[
-                ft.Row(controls=[
-                    ft.Icon(ft.Icons.INFO_OUTLINE, color=ft.Colors.ORANGE_700, size=16),
-                    ft.Text(
-                        f"Sobrante: ${sobrante_usd:.2f}  ·  Bs. {sobrante_bs:,.2f}",
-                        weight="bold", color=ft.Colors.ORANGE_700, size=13,
+            content=ft.Column(
+                controls=[
+                    ft.Row(
+                        controls=[
+                            ft.Icon(
+                                ft.Icons.INFO_OUTLINE,
+                                color=ft.Colors.ORANGE_700,
+                                size=16,
+                            ),
+                            ft.Text(
+                                f"Sobrante: ${sobrante_usd:.2f}  ·  Bs. {sobrante_bs:,.2f}",
+                                weight="bold",
+                                color=ft.Colors.ORANGE_700,
+                                size=13,
+                            ),
+                        ],
+                        spacing=6,
                     ),
-                ], spacing=6),
-                radio,
-                panel_gestor,
-            ], spacing=10),
-            bgcolor=ft.Colors.ORANGE_50, padding=14, border_radius=10,
+                    radio,
+                    panel_gestor,
+                ],
+                spacing=10,
+            ),
+            bgcolor=ft.Colors.ORANGE_50,
+            padding=14,
+            border_radius=10,
             border=ft.border.all(1, ft.Colors.ORANGE_200),
         )
 
@@ -936,9 +1374,9 @@ class DialogoPago:
             if not caja:
                 raise Exception("No se encontró el registro de caja.")
 
-            tasa             = self.config.tasa_cambio
+            tasa = self.config.tasa_cambio
             total_pagado_usd = sum(p["monto_usd"] for p in self.pagos_sesion)
-            pendiente        = self._pendiente()
+            pendiente = self._pendiente()
 
             estadia_bd = (
                 sesion.query(Estadia)
@@ -952,61 +1390,66 @@ class DialogoPago:
             # ── 1. Registrar cada Pago + asiento PAGO en el ledger ────────────
             for pago in self.pagos_sesion:
                 nuevo_pago = Pago(
-                    estadia_id    = self.id_estadia,
-                    monto_usd     = pago["monto_usd"],
-                    monto_bs      = pago["monto_bs"],
-                    tasa_cambio   = tasa,
-                    metodo        = pago["metodo"],
-                    referencia    = pago.get("referencia") or "—",
-                    descripcion   = pago.get("descripcion_extra", "Cobro de factura"),
-                    creado_en     = datetime.now(),
-                    es_devolucion = False,
+                    estadia_id=self.id_estadia,
+                    monto_usd=pago["monto_usd"],
+                    monto_bs=pago["monto_bs"],
+                    tasa_cambio=tasa,
+                    metodo=pago["metodo"],
+                    referencia=pago.get("referencia") or "—",
+                    descripcion=pago.get("descripcion_extra", "Cobro de factura"),
+                    creado_en=datetime.now(),
+                    es_devolucion=False,
                 )
                 sesion.add(nuevo_pago)
                 sesion.flush()
 
                 # Actualizar caja y crédito según método
                 if pago.get("es_saldo_favor"):
-                    monto_sf       = pago["monto_usd"]
+                    monto_sf = pago["monto_usd"]
                     huesped_ext_id = pago.get("huesped_externo_id")
-                    doc_ext        = pago.get("huesped_externo_doc", "—")
-                    nombre_ext     = pago.get("huesped_externo_nombre", "")
+                    doc_ext = pago.get("huesped_externo_doc", "—")
+                    nombre_ext = pago.get("huesped_externo_nombre", "")
                     if huesped_ext_id:
                         h_ext = sesion.get(Huesped, huesped_ext_id)
                         if h_ext:
                             h_ext.credito_usd = max(
                                 _D2("0"),
-                                (_D2(str(h_ext.credito_usd or 0)) - _D2(str(monto_sf)))
+                                (_D2(str(h_ext.credito_usd or 0)) - _D2(str(monto_sf))),
                             )
-                        nuevo_pago.descripcion = (
-                            f"Saldo aplicado de {nombre_ext} (doc: {doc_ext}) a estadía #{self.id_estadia}"
-                        )
+                        nuevo_pago.descripcion = f"Saldo aplicado de {nombre_ext} (doc: {doc_ext}) a estadía #{self.id_estadia}"
                     else:
                         if estadia_bd and estadia_bd.huespedes:
                             titular = sesion.get(Huesped, estadia_bd.huespedes[0].id)
                             if titular:
                                 titular.credito_usd = max(
                                     _D2("0"),
-                                    (_D2(str(titular.credito_usd or 0)) - _D2(str(monto_sf)))
+                                    (
+                                        _D2(str(titular.credito_usd or 0))
+                                        - _D2(str(monto_sf))
+                                    ),
                                 )
-                elif pago["metodo"] in [MetodoPago.CASH_USD, MetodoPago.ZELLE, MetodoPago.DEBIT_CARD]:
-                    caja.saldo_principal_usd = (
-                        _D2(str(caja.saldo_principal_usd or 0)) + _D2(str(pago["monto_usd"]))
-                    )
+                elif pago["metodo"] in [
+                    MetodoPago.CASH_USD,
+                    MetodoPago.ZELLE,
+                    MetodoPago.DEBIT_CARD,
+                ]:
+                    caja.saldo_principal_usd = _D2(
+                        str(caja.saldo_principal_usd or 0)
+                    ) + _D2(str(pago["monto_usd"]))
                 else:
-                    caja.saldo_principal_bs = (
-                        _D2(str(caja.saldo_principal_bs or 0)) + _D2(str(pago["monto_bs"]))
-                    )
+                    caja.saldo_principal_bs = _D2(
+                        str(caja.saldo_principal_bs or 0)
+                    ) + _D2(str(pago["monto_bs"]))
 
                 # Asiento contable PAGO
                 led.registrar_pago(
                     sesion,
-                    estadia_id = self.id_estadia,
-                    concepto   = nuevo_pago.descripcion or "Pago",
-                    monto_usd  = _D2(str(pago["monto_usd"])),
-                    tasa       = _D2(str(tasa)),
-                    referencia = pago.get("referencia") or "—",
-                    pago_id    = nuevo_pago.id,
+                    estadia_id=self.id_estadia,
+                    concepto=nuevo_pago.descripcion or "Pago",
+                    monto_usd=_D2(str(pago["monto_usd"])),
+                    tasa=_D2(str(tasa)),
+                    referencia=pago.get("referencia") or "—",
+                    pago_id=nuevo_pago.id,
                 )
 
             # ── 2. Marcar líneas del folio como canceladas ────────────────────
@@ -1022,13 +1465,13 @@ class DialogoPago:
                 ]
                 resumen = "; ".join(conceptos[:3])
                 if len(conceptos) > 3:
-                    resumen += f" (+{len(conceptos)-3} más)"
+                    resumen += f" (+{len(conceptos) - 3} más)"
                 folio_engine.crear_saldo_pendiente(
                     sesion,
-                    estadia_id = self.id_estadia,
-                    monto_usd  = _D2(str(saldo_pendiente_tx)),
-                    concepto   = f"Saldo pendiente — {resumen}",
-                    config     = self.config,
+                    estadia_id=self.id_estadia,
+                    monto_usd=_D2(str(saldo_pendiente_tx)),
+                    concepto=f"Saldo pendiente — {resumen}",
+                    config=self.config,
                 )
 
             # ── 4. Sobrante (pagó de más) ─────────────────────────────────────
@@ -1040,31 +1483,34 @@ class DialogoPago:
                     if estadia_bd and estadia_bd.huespedes:
                         titular = sesion.get(Huesped, estadia_bd.huespedes[0].id)
                         if titular:
-                            titular.credito_usd = (
-                                _D2(str(titular.credito_usd or 0)) + _D2(str(monto_sobrante))
-                            )
+                            titular.credito_usd = _D2(
+                                str(titular.credito_usd or 0)
+                            ) + _D2(str(monto_sobrante))
                     pago_sob = Pago(
-                        estadia_id    = self.id_estadia,
-                        monto_usd     = monto_sobrante,
-                        monto_bs      = a_bs(monto_sobrante, tasa),
-                        es_devolucion = True,
-                        metodo        = MetodoPago.CASH_USD,
-                        tasa_cambio   = tasa,
-                        descripcion   = "Sobrante → saldo a favor del huésped",
-                        creado_en     = datetime.now(),
+                        estadia_id=self.id_estadia,
+                        monto_usd=monto_sobrante,
+                        monto_bs=a_bs(monto_sobrante, tasa),
+                        es_devolucion=True,
+                        metodo=MetodoPago.CASH_USD,
+                        tasa_cambio=tasa,
+                        descripcion="Sobrante → saldo a favor del huésped",
+                        creado_en=datetime.now(),
                     )
                     sesion.add(pago_sob)
                     sesion.flush()
                     led.registrar_devolucion(
                         sesion,
-                        estadia_id = self.id_estadia,
-                        concepto   = "Sobrante → saldo a favor del huésped",
-                        monto_usd  = _D2(str(monto_sobrante)),
-                        tasa       = _D2(str(tasa)),
-                        pago_id    = pago_sob.id,
+                        estadia_id=self.id_estadia,
+                        concepto="Sobrante → saldo a favor del huésped",
+                        monto_usd=_D2(str(monto_sobrante)),
+                        tasa=_D2(str(tasa)),
+                        pago_id=pago_sob.id,
                     )
                 else:
-                    if self._gestor_vuelto is None or not self._gestor_vuelto.es_valido():
+                    if (
+                        self._gestor_vuelto is None
+                        or not self._gestor_vuelto.es_valido()
+                    ):
                         raise Exception(
                             "El monto a entregar excede el vuelto disponible. "
                             "Reduce los montos."
@@ -1075,90 +1521,121 @@ class DialogoPago:
                         titular_id = estadia_bd.huespedes[0].id
                     self._gestor_vuelto.aplicar(
                         sesion,
-                        estadia_id = self.id_estadia,
-                        titular_id = titular_id,
+                        estadia_id=self.id_estadia,
+                        titular_id=titular_id,
                     )
 
             # ── Registrar bitácora + Telegram ────────────────────────────────────
- 
+
             hab_num = ""
             if estadia_bd and estadia_bd.habitacion:
                 hab_num = estadia_bd.habitacion.numero
- 
+
             if self.checkin_info:
-                # Viene de un check-in nuevo → mensaje estructurado de check-in
-                ci           = self.checkin_info
+                ci = self.checkin_info
                 es_pendiente = saldo_pendiente_tx > 0.01
- 
-                # Bitácora interna — sin Telegram (lo enviamos con checkin_mensaje)
+                bitacora_event_id = ci.get("bitacora_event_id")
+
+                reply_to_msg_id = None
+                if bitacora_event_id:
+                    try:
+                        from modules.notifications.dispatcher import (
+                            obtener_telegram_message_id,
+                        )
+
+                        reply_to_msg_id = obtener_telegram_message_id(bitacora_event_id)
+                        if reply_to_msg_id:
+                            reply_to_msg_id = int(reply_to_msg_id)
+                    except Exception as e:
+                        print(f"[PaymentDialog] Error al obtener reply_to: {e}")
+
                 _bita(
-                    sesion             = sesion,
-                    pagina             = self.pagina,
-                    tipo               = _TE.CHECKIN,
-                    habitacion         = hab_num,
-                    concepto           = (
+                    sesion=sesion,
+                    pagina=self.pagina,
+                    tipo=_TE.CHECKIN,
+                    habitacion=hab_num,
+                    concepto=(
                         f"Hab{ci['habitacion']} ${ci['monto']:.2f} "
-                        + ("pendiente por cancelar"
-                           if es_pendiente
-                           else f"cancelado — {ci['nombre']}")
+                        + (
+                            "pendiente por cancelar"
+                            if es_pendiente
+                            else f"cancelado — {ci['nombre']}"
+                        )
                     ),
-                    monto_usd          = total_pagado_usd,
-                    monto_bs           = sum(p.get("monto_bs", 0) for p in self.pagos_sesion),
-                    confirmado         = not es_pendiente,
-                    notificar_telegram = False,
+                    monto_usd=total_pagado_usd,
+                    monto_bs=sum(p.get("monto_bs", 0) for p in self.pagos_sesion),
+                    confirmado=not es_pendiente,
+                    notificar_telegram=False,
                 )
- 
-                # Telegram: mensaje de check-in con formato específico
+
                 try:
-                    from modules.notifications.formatter import checkin_mensaje
+                    from modules.notifications.formatter import pago_respuesta
                     from modules.notifications.dispatcher import enviar_texto
-                    recep = (
-                        (self.pagina.session.get("usuario_activo") or {})
-                        .get("nombre_completo", "")
+
+                    recep = (self.pagina.session.get("usuario_activo") or {}).get(
+                        "nombre_completo", ""
                     )
-                    msg = checkin_mensaje(
-                        habitacion    = ci["habitacion"],
-                        precio_usd    = ci["monto"],
-                        nombre        = ci["nombre"],
-                        noches        = ci["noches"],
-                        fecha_salida  = ci["fecha_salida"],
-                        recepcionista = recep,
-                        pagos         = self.pagos_sesion,
-                        pendiente     = es_pendiente,
+                    msg = pago_respuesta(
+                        habitacion=ci["habitacion"],
+                        nombre=ci["nombre"],
+                        monto_pagado=total_pagado_usd,
+                        pagos=self.pagos_sesion,
+                        saldo_pendiente=saldo_pendiente_tx,
+                        recepcionista=recep,
+                        es_respuesta=reply_to_msg_id is not None,
+                        lineas_detalle=self._lineas_detalle,
                     )
-                    enviar_texto(msg)
+                    enviar_texto(
+                        msg,
+                        reply_to_message_id=reply_to_msg_id,
+                    )
                 except Exception as _e:
                     print(f"[PaymentDialog] Error Telegram checkin: {_e}")
- 
+
             else:
                 # Pago desde details.py (no es check-in nuevo) → bitácora normal
                 _bita(
-                    sesion      = sesion,
-                    pagina      = self.pagina,
-                    tipo        = _TE.PAGO,
-                    habitacion  = hab_num,
-                    concepto    = (
+                    sesion=sesion,
+                    pagina=self.pagina,
+                    tipo=_TE.PAGO,
+                    habitacion=hab_num,
+                    concepto=(
                         f"Cuenta pendiente de ${self.total_a_pagar:.2f} — "
                         f"{'Completo' if saldo_pendiente_tx <= 0.01 else f'Parcial, quedan ${saldo_pendiente_tx:.2f}'}"
                     ),
-                    monto_usd   = total_pagado_usd,
-                    monto_bs    = sum(p.get("monto_bs", 0) for p in self.pagos_sesion),
-                    metodo_pago = ", ".join({p["metodo"].value for p in self.pagos_sesion}),
-                    confirmado  = saldo_pendiente_tx <= 0.01,
+                    monto_usd=total_pagado_usd,
+                    monto_bs=sum(p.get("monto_bs", 0) for p in self.pagos_sesion),
+                    metodo_pago=", ".join(
+                        {p["metodo"].value for p in self.pagos_sesion}
+                    ),
+                    confirmado=saldo_pendiente_tx <= 0.01,
                 )
- 
+
             sesion.commit()
             self.pagina.close(self.dialogo)
-            self.pagina.open(ft.SnackBar(
-                ft.Text("Cobro registrado correctamente" if saldo_pendiente_tx <= 0.01 else f"Cobro parcial — Quedan ${saldo_pendiente_tx:.2f} pendientes"),
-                bgcolor=ft.Colors.GREEN_700 if saldo_pendiente_tx <= 0.01 else ft.Colors.BLUE_700,
-            ))
+            self.pagina.open(
+                ft.SnackBar(
+                    ft.Text(
+                        "Cobro registrado correctamente"
+                        if saldo_pendiente_tx <= 0.01
+                        else f"Cobro parcial — Quedan ${saldo_pendiente_tx:.2f} pendientes"
+                    ),
+                    bgcolor=ft.Colors.GREEN_700
+                    if saldo_pendiente_tx <= 0.01
+                    else ft.Colors.BLUE_700,
+                )
+            )
             if self.al_completar:
                 self.al_completar()
 
         except Exception as error:
             sesion.rollback()
-            self.pagina.open(ft.SnackBar(ft.Text(f"Error al registrar el pago: {error}"), bgcolor=ft.Colors.RED_700))
+            self.pagina.open(
+                ft.SnackBar(
+                    ft.Text(f"Error al registrar el pago: {error}"),
+                    bgcolor=ft.Colors.RED_700,
+                )
+            )
         finally:
             sesion.close()
 
