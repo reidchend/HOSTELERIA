@@ -93,6 +93,21 @@ class EstadoReservacion(enum.Enum):
     CANCELADA = "cancelada"  # cancelada
 
 
+class GrupoHabitacion(Base):
+    __tablename__ = "room_groups"
+
+    id = Column(Integer, primary_key=True)
+    nombre = Column(String(100), nullable=False)
+    color_etiqueta = Column(String(20), default="#8B5CF6")
+    huesped_principal_id = Column(Integer, ForeignKey("guests.id"), nullable=True)
+    observaciones = Column(String(500), nullable=True)
+    creado_en = Column(DateTime, default=datetime.now)
+
+    huesped_principal = relationship("Huesped")
+    habitaciones = relationship("Habitacion", back_populates="grupo_habitacion")
+    estadias = relationship("Estadia", back_populates="grupo_habitacion")
+
+
 class Reservacion(Base):
     """
     Reservación de habitación — puede venir del formulario web o crearse
@@ -180,7 +195,9 @@ class Habitacion(Base):
     descripcion = Column(String(200))
     amenidades = Column(String(200))
     ultima_limpieza = Column(DateTime, default=datetime.now)
+    grupo_id = Column(Integer, ForeignKey("room_groups.id"), nullable=True)
 
+    grupo_habitacion = relationship("GrupoHabitacion", back_populates="habitaciones")
     estadias_activas = relationship(
         "Estadia", back_populates="habitacion", lazy="selectin"
     )
@@ -214,6 +231,7 @@ class Estadia(Base):
     tipo = Column(Enum(TipoEstadia), default=TipoEstadia.NOCHE)
     horas_contratadas = Column(Integer, nullable=True)  # solo para horarias
     costo_hora = Column(Numeric(12, 4), default=20)  # $20 por hora
+    grupo_id = Column(Integer, ForeignKey("room_groups.id"), nullable=True)
 
     habitacion = relationship("Habitacion", back_populates="estadias_activas")
     huespedes = relationship("Huesped", secondary=estadia_huespedes, lazy="selectin")
@@ -222,6 +240,7 @@ class Estadia(Base):
     ledger_movimientos = relationship(
         "LedgerMovimiento", back_populates="estadia", lazy="selectin"
     )
+    grupo_habitacion = relationship("GrupoHabitacion", back_populates="estadias")
 
 
 class FolioLinea(Base):
@@ -454,3 +473,7 @@ class Turno(Base):
         order_by="CuentaPagar.creado_en",
         lazy="selectin",
     )
+
+
+
+

@@ -358,3 +358,34 @@ def enviar_cierre_turno(
         )
     except Exception as e:
         print(f"[Dispatcher] Error cierre turno: {e}")
+
+
+def enviar_checkin_grupal(
+    nombre_grupo: str,
+    habitaciones: list,
+    huesped_principal: str,
+    total_grupo: float,
+    noches: int,
+    fecha_salida: str,
+    recepcionista: str,
+    pagos: list = None,
+    pendiente: bool = False,
+    tasa: float = 0,
+):
+    try:
+        _encolar(
+            fmt.checkin_grupal_mensaje(
+                nombre_grupo=nombre_grupo,
+                habitaciones=habitaciones,
+                huesped_principal=huesped_principal,
+                total_grupo=total_grupo,
+                noches=noches,
+                fecha_salida=fecha_salida,
+                recepcionista=recepcionista,
+                pagos=pagos,
+                pendiente=pendiente,
+                tasa=tasa,
+            )
+        )
+    except Exception as e:
+        print(f"[Dispatcher] Error check-in grupal: {e}")

@@ -631,3 +631,86 @@ def pago_cuenta(
     lineas.append(_hora())
 
     return "\n".join(filter(None, lineas))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CHECK-IN GRUPAL — formateador para grupos de habitaciones
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def checkin_grupal_mensaje(
+    nombre_grupo: str,
+    habitaciones: list,
+    huesped_principal: str,
+    total_grupo: float,
+    noches: int,
+    fecha_salida: str,
+    recepcionista: str,
+    pagos: list = None,
+    pendiente: bool = False,
+    tasa: float = 0,
+) -> str:
+    """
+    Genera el mensaje de Telegram para un check-in grupal.
+    Sigue la misma lógica que checkin_mensaje:
+    
+    • Pago parcial:
+        💰 $60.00  ✅ cancelado por
+           💸 Zelle  $30.00
+        ⏳ Pendiente por cancelar $30.00
+
+    • pendiente=True (omitió pago o pago parcial):
+        💰 $60.00  ⏳ Pendiente por cancelar
+
+    • Pagado completo:
+        💰 $60.00  ✅ cancelado por 📱 Pago Móvil  Bs.2,200.00
+    """
+    lineas = [
+        _HOTEL,
+        _SEP,
+        f"🛎 <b>CHECK-IN GRUPO</b>",
+        f"📛 {nombre_grupo}",
+    ]
+    
+    pagos_hechos = pagos if pagos else []
+    total_abonado = sum(p.get("monto_usd", 0) for p in pagos_hechos)
+    saldo_pendiente = total_grupo - total_abonado
+    
+    precio_txt = f"<b>${total_grupo:,.2f}</b>"
+    
+    if pagos_hechos and saldo_pendiente > 0.01:
+        metodos_txt = _formatear_metodos(pagos_hechos)
+        if len(pagos_hechos) == 1:
+            lineas.append(f"💰 {precio_txt}  ✅ cancelado por {metodos_txt}")
+        else:
+            lineas.append(f"💰 {precio_txt}  ✅ cancelado por\n   {metodos_txt.strip()}")
+        lineas.append(f"⏳ Pendiente por cancelar ${saldo_pendiente:,.2f}")
+    elif total_abonado > total_grupo + 0.01:
+        metodos_txt = _formatear_metodos(pagos_hechos)
+        lineas.append(f"💰 {precio_txt}  ✅ cancelado por {metodos_txt}")
+        if saldo_pendiente > 0.01:
+            lineas.append(f"🔴 Pendiente por devolver ${abs(saldo_pendiente):,.2f}")
+    elif pendiente or not pagos_hechos:
+        lineas.append(f"💰 {precio_txt}  ⏳ Pendiente por cancelar")
+    else:
+        metodos_txt = _formatear_metodos(pagos_hechos)
+        if len(pagos_hechos) == 1:
+            lineas.append(f"💰 {precio_txt}  ✅ cancelado por {metodos_txt}")
+        else:
+            lineas.append(f"💰 {precio_txt}  ✅ cancelado por\n   {metodos_txt.strip()}")
+    
+    if huesped_principal:
+        lineas.append(_linea("👥", "Huésped principal", huesped_principal))
+    
+    hab_numeros = ", ".join([str(h.get("numero", "")) for h in habitaciones])
+    lineas.append(_linea("🏠", "Habitaciones", hab_numeros))
+    
+    if noches > 0 and fecha_salida:
+        lineas.append(f"🌙 {noches} noche{'s' if noches != 1 else ''}  ·  📅 Sal. {fecha_salida}")
+    
+    if recepcionista:
+        lineas.append(_linea("🧑‍💼", "Registrado por", recepcionista))
+    
+    lineas.append(_hora())
+
+    return "\n".join(filter(None, lineas))

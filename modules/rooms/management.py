@@ -1,9 +1,10 @@
 import flet as ft
 from datetime import date
-from database.models import Habitacion, EstadoHabitacion, Estadia
+from database.models import Habitacion, EstadoHabitacion, Estadia, GrupoHabitacion
 from database.connection import SesionLocal
-from sqlalchemy import cast, Integer
+from sqlalchemy import cast, Integer, or_
 from sqlalchemy.orm import selectinload
+import random
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PALETA POR ESTADO  —  Colores adaptados para legibilidad en ambos temas
@@ -77,6 +78,11 @@ _ESTADO_CFG = {
     },
 }
 
+_COLORES_GRUPO = [
+    "#EF4444", "#F59E0B", "#10B981", "#3B82F6", "#8B5CF6", 
+    "#EC4899", "#14B8A6", "#F97316", "#6366F1", "#84CC16"
+]
+
 _TIPO_ABREV = {
     "MATRIMONIAL": "MAT",
     "DOBLE":       "DOB",
@@ -91,10 +97,13 @@ _TIPO_ABREV = {
 # ══════════════════════════════════════════════════════════════════════════════
 
 class GridHabitaciones:
-    def __init__(self, estado_app: dict, al_hacer_clic):
+    def __init__(self, estado_app: dict, al_hacer_clic, al_crear_grupo=None):
         self.estado_app    = estado_app
         self.al_hacer_clic = al_hacer_clic
-
+        self.al_crear_grupo = al_crear_grupo
+        self.modo_seleccion = False
+        self.habitaciones_seleccionadas = set()
+        
         self.grid = ft.GridView(
             expand=True,
             max_extent=140, 
@@ -102,33 +111,35 @@ class GridHabitaciones:
             spacing=12,
             run_spacing=12,
             padding=ft.padding.all(20),
-            # SE ELIMINÓ bgcolor="surface" de aquí porque GridView no lo soporta
-            # y era lo que estaba causando que el grid desapareciera por completo.
         )
+        
+        self._barra_seleccion = None
+        self._btn_accion = None
 
-    def _tarjeta(self, hab: Habitacion) -> ft.Container:
+    def _tarjeta(self, hab: Habitacion, es_seleccionada: bool = False) -> ft.Container:
         cfg = _ESTADO_CFG.get(hab.estado, _ESTADO_CFG[EstadoHabitacion.FREE])
         tiene_deuda = False
         sale_hoy    = False
         nombre_h    = ""
         hora_salida = ""
         es_operativa = False
+        
+        color_grupo = None
+        if hab.grupo_habitacion:
+            color_grupo = hab.grupo_habitacion.color_etiqueta
 
         if hab.estado == EstadoHabitacion.OCCUPIED and hab.estadias_activas:
             est = hab.estadias_activas[0]
             tiene_deuda = any(not fl.cancelada for fl in (est.folio_lineas or []))
-            # Verificar si es operativa
             es_operativa = hasattr(est, 'tipo') and est.tipo and str(est.tipo).endswith('HORARIA')
             if est.salida:
                 salida_d = est.salida.date() if hasattr(est.salida, "date") else est.salida
                 sale_hoy = (salida_d == date.today())
-                # Si es operativa, mostrar hora de salida
                 if es_operativa:
                     hora_salida = est.salida.strftime("%H:%M") if hasattr(est.salida, 'strftime') else ""
             if est.huespedes:
                 nombre_h = est.huespedes[0].nombre.split()[0].upper()
 
-        # Si es operativa, usar colores azules
         if es_operativa:
             cfg = {
                 "label":        "OPERATIVA",
@@ -186,17 +197,118 @@ class GridHabitaciones:
             ),
             bgcolor="#DC2626", padding=ft.padding.symmetric(horizontal=5, vertical=2), border_radius=15, visible=sale_hoy
         )
+        
+        checkbox_seleccion = ft.Container(
+            content=ft.Icon(
+                ft.Icons.CHECK_CIRCLE if es_seleccionada else ft.Icons.RADIO_BUTTON_UNCHECKED,
+                color=ft.Colors.PRIMARY if es_seleccionada else ft.Colors.ON_SURFACE_VARIANT,
+                size=18
+            ),
+            visible=self.modo_seleccion,
+            on_click=lambda _: self._toggle_seleccion(hab),
+        )
+        
+        grupo_badge = ft.Container(
+            content=ft.Container(
+                width=30, height=4, bgcolor=color_grupo, border_radius=2
+            ),
+            visible=color_grupo is not None,
+            padding=ft.padding.only(top=0),
+        )
 
         return ft.Container(
-            content=ft.Column([fila_top, numero_widget, nombre_widget, estado_row, ft.Row([deuda_badge, salida_badge], spacing=3, wrap=True)], spacing=3, expand=True),
+            content=ft.Column([
+                ft.Row([checkbox_seleccion, fila_top], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+                ft.Row([numero_widget, ft.Container(expand=True)], expand=True),
+                nombre_widget,
+                estado_row,
+                grupo_badge,
+                ft.Row([deuda_badge, salida_badge], spacing=3, wrap=True),
+            ], spacing=3, expand=True),
             padding=ft.padding.all(10),
             border_radius=12,
-            border=ft.border.all(1.2, cfg["card_border"]),
+            border=ft.border.all(2 if es_seleccionada else 1.2, ft.Colors.PRIMARY if es_seleccionada else cfg["card_border"]),
             gradient=ft.LinearGradient(begin=ft.alignment.top_left, end=ft.alignment.bottom_right, colors=[cfg["card_top"], cfg["card_bot"]]),
-            on_click=lambda _: self.al_hacer_clic(hab),
+            on_click=lambda _: self._manejar_clic(hab),
             animate_scale=ft.Animation(200, ft.AnimationCurve.EASE_OUT),
             scale=1.0,
         )
+
+    def _manejar_clic(self, hab: Habitacion):
+        if self.modo_seleccion:
+            self._toggle_seleccion(hab)
+        else:
+            self.al_hacer_clic(hab)
+
+    def _toggle_seleccion(self, hab: Habitacion):
+        if hab.id in self.habitaciones_seleccionadas:
+            self.habitaciones_seleccionadas.discard(hab.id)
+        else:
+            self.habitaciones_seleccionadas.add(hab.id)
+        self._actualizar_grid()
+        self._actualizar_barra_seleccion()
+
+    def _actualizar_barra_seleccion(self):
+        if not self._barra_seleccion:
+            return
+        n = len(self.habitaciones_seleccionadas)
+        self._btn_accion.disabled = n < 1
+        # controls[0] es el Text, controls[1] es el Row
+        self._barra_seleccion.content.controls[0].value = f" {n} seleccionada(s)"
+        self._barra_seleccion.update()
+
+    def _actualizar_grid(self):
+        sesion = SesionLocal()
+        try:
+            habs = (
+                sesion.query(Habitacion)
+                .options(
+                    selectinload(Habitacion.estadias_activas).selectinload(Estadia.huespedes),
+                    selectinload(Habitacion.estadias_activas).selectinload(Estadia.folio_lineas),
+                    selectinload(Habitacion.grupo_habitacion),
+                )
+                .order_by(cast(Habitacion.numero, Integer))
+                .all()
+            )
+            self.grid.controls = [
+                self._tarjeta(h, h.id in self.habitaciones_seleccionadas) 
+                for h in habs
+            ]
+            self.grid.update()
+        finally:
+            sesion.close()
+
+    def _crear_grupo_desde_seleccion(self, _):
+        if not self.habitaciones_seleccionadas:
+            return
+        if self.al_crear_grupo:
+            sesion = SesionLocal()
+            try:
+                habs = sesion.query(Habitacion).filter(
+                    Habitacion.id.in_(self.habitaciones_seleccionadas)
+                ).all()
+                nums = [h.numero for h in habs]
+                self.al_crear_grupo(habs)
+            finally:
+                sesion.close()
+        self._cancelar_seleccion()
+
+    def _cancelar_seleccion(self, _=None):
+        self.modo_seleccion = False
+        self.habitaciones_seleccionadas.clear()
+        self._actualizar_grid()
+        self._actualizar_barra_seleccion()
+
+    def alternar_seleccion(self):
+        self.modo_seleccion = not self.modo_seleccion
+        if not self.modo_seleccion:
+            self.habitaciones_seleccionadas.clear()
+        self._actualizar_grid()
+        self._actualizar_barra_seleccion()
+        return self.modo_seleccion
+
+    def obtener_seleccion(self):
+        return self.habitaciones_seleccionadas
 
     def construir(self) -> ft.Container:
         sesion = SesionLocal()
@@ -206,14 +318,14 @@ class GridHabitaciones:
                 .options(
                     selectinload(Habitacion.estadias_activas).selectinload(Estadia.huespedes),
                     selectinload(Habitacion.estadias_activas).selectinload(Estadia.folio_lineas),
+                    selectinload(Habitacion.grupo_habitacion),
                 )
                 .order_by(cast(Habitacion.numero, Integer))
                 .all()
             )
 
-            self.grid.controls = [self._tarjeta(h) for h in habs]
+            self.grid.controls = [self._tarjeta(h, False) for h in habs]
 
-            # Conteo de estados
             conteos = {est: 0 for est in _ESTADO_CFG.keys()}
             for h in habs:
                 conteos[h.estado] = conteos.get(h.estado, 0) + 1
@@ -234,8 +346,13 @@ class GridHabitaciones:
                         padding=ft.padding.symmetric(horizontal=10, vertical=5),
                     )
                 )
+            
+            btn_seleccionar = ft.ElevatedButton(
+                icon=ft.Icons.CHECKLIST_RTL,
+                text="Seleccionar Grupo",
+                on_click=lambda _: self.alternar_seleccion(),
+            )
 
-            # Barra superior (Resumen)
             barra_resumen = ft.Container(
                 content=ft.Row([
                     ft.Row([
@@ -244,23 +361,40 @@ class GridHabitaciones:
                     ]),
                     ft.VerticalDivider(width=1, color="outline"),
                     ft.Row(controls=chips_resumen, spacing=6, wrap=True),
+                    ft.Row([btn_seleccionar], spacing=6),
                 ], vertical_alignment=ft.CrossAxisAlignment.CENTER),
                 padding=ft.padding.symmetric(horizontal=20, vertical=10),
-                bgcolor="surface", # Coincide con el fondo principal
+                bgcolor="surface",
                 border=ft.border.only(bottom=ft.border.BorderSide(1, "outlinevariant")),
                 margin=0,
             )
+            
+            self._btn_accion = ft.ElevatedButton(
+                "Crear Grupo",
+                icon=ft.Icons.GROUP_WORK,
+                on_click=self._crear_grupo_desde_seleccion,
+                disabled=True,
+            )
+            
+            self._barra_seleccion = ft.Container(
+                content=ft.Row([
+                    ft.Text("0 seleccionada(s)", weight="bold"),
+                    ft.Row([self._btn_accion, ft.TextButton("Cancelar", on_click=self._cancelar_seleccion)], spacing=10),
+                ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+                bgcolor=ft.Colors.PRIMARY_CONTAINER,
+                padding=ft.padding.symmetric(horizontal=20, vertical=10),
+                visible=self.modo_seleccion,
+            )
 
-            # Contenedor envolvente principal: Este es el que mata el fondo negro de la app principal
             return ft.Container(
                 expand=True,
-                bgcolor="surface", # Esto asegura que no haya fondo negro en toda esta área
+                bgcolor="surface",
                 margin=0,
                 padding=0,
                 content=ft.Column(
                     controls=[
-                        barra_resumen, 
-                        # Colocamos el grid directamente en un container expandido
+                        barra_resumen,
+                        self._barra_seleccion,
                         ft.Container(
                             content=self.grid,
                             expand=True,

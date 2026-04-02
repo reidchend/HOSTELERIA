@@ -142,6 +142,12 @@ def principal(pagina: ft.Page):
             _zona_contenido.opacity = 1
             _zona_contenido.update()
             return
+        elif nombre_vista == "grupos":
+            from modules.rooms.pantalla_grupos import PantallaGrupos
+
+            _zona_contenido.content = PantallaGrupos(
+                pagina, estado_app, al_volver=lambda: cambiar_vista("dashboard")
+            )
         else:
             _mostrar_dashboard()
             _zona_contenido.opacity = 1
@@ -156,11 +162,54 @@ def principal(pagina: ft.Page):
             _mostrar_dashboard()
 
     def _mostrar_dashboard():
-        cuadricula = GridHabitaciones(estado_app, al_hacer_clic_habitacion)
+        cuadricula = GridHabitaciones(estado_app, al_hacer_clic_habitacion, al_crear_grupo=al_crear_grupo_desde_seleccion)
         _zona_contenido.content = ft.Container(
             content=cuadricula.construir(), expand=True, padding=20
         )
         _zona_contenido.update()
+
+    def al_crear_grupo_desde_seleccion(habitaciones):
+        from modules.rooms.checkin_grupal import DialogoCrearGrupo
+        DialogoCrearGrupo(
+            pagina, 
+            habitaciones, 
+            al_crear=lambda g: _mostrar_dialogo_checkin_grupal(g)
+        ).mostrar()
+
+    def _mostrar_dialogo_checkin_grupal(grupo):
+        def _(e):
+            if e.control.text == "Sí, hacer Check-in":
+                iniciar_checkin_grupal(grupo)
+            elif e.control.text == "No, solo crear grupo":
+                refrescar_grid()
+                pagina.show_snack_bar(
+                    ft.SnackBar(content=ft.Text(f"Grupo '{grupo.nombre}' creado. Accede a Grupos para ver el estado."))
+                )
+            pagina.close(dlg_confirm)
+        
+        dlg_confirm = ft.AlertDialog(
+            title=ft.Text("Grupo creado"),
+            content=ft.Text(f"El grupo '{grupo.nombre}' ha sido creado. ¿Desea hacer el check-in de las habitaciones ahora?"),
+            actions=[
+                ft.TextButton("No, solo crear grupo", on_click=_),
+                ft.ElevatedButton("Sí, hacer Check-in", on_click=_),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        pagina.open(dlg_confirm)
+
+    def iniciar_checkin_grupal(grupo):
+        from modules.rooms.checkin_grupal import DialogoCheckInGrupal
+        sesion = SesionLocal()
+        try:
+            habs = sesion.query(Habitacion).filter(Habitacion.grupo_id == grupo.id).all()
+            habs_libres = [h for h in habs if h.estado == EstadoHabitacion.FREE]
+            if habs_libres:
+                DialogoCheckInGrupal(pagina, habs_libres, grupo, al_completar=refrescar_grid).mostrar()
+            else:
+                pagina.show_snack_bar(ft.SnackBar(content=ft.Text("No hay habitaciones disponibles para hacer check-in")))
+        finally:
+            sesion.close()
 
     def al_hacer_clic_habitacion(habitacion):
         if habitacion.estado == EstadoHabitacion.FREE:
@@ -312,6 +361,7 @@ def principal(pagina: ft.Page):
             # Items de Navegación
             nav_items = [
                 ("dashboard", "Inicio", ft.Icons.GRID_VIEW_ROUNDED),
+                ("grupos", "Grupos", ft.Icons.GROUP_WORK_ROUNDED),
                 ("reservaciones", "Reservas", ft.Icons.EVENT_AVAILABLE_ROUNDED),
                 ("pendientes", "Pendientes", ft.Icons.PENDING_ACTIONS_ROUNDED),
                 ("bitacora", "Bitácora", ft.Icons.HISTORY_ROUNDED),
