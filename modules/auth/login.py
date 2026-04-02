@@ -4,6 +4,7 @@ import flet as ft
 from database.connection import SesionLocal
 from database.models import Usuario
 from utils.helpers import verificar_contrasena
+from utils import handle_error
 
 
 class PantallaLogin:
@@ -127,6 +128,7 @@ class PantallaLogin:
                 self.pagina.update()
 
         except Exception as error:
+            handle_error(error, self.pagina, "Login")
             self.mensaje.value = f"Error de conexión: {str(error)}"
             self.mensaje.color = ft.Colors.RED_600
             self.pagina.update()

@@ -1,14 +1,9 @@
 # modules/finance/extra_charges.py
 
 import flet as ft
-from database.connection import SesionLocal
-from database.models import Estadia, Habitacion, Huesped, BitacoraEvento
-from modules.finance.engine import folio as folio_engine
-from modules.finance.engine import ledger as led
-from modules.finance.bitacora import registrar as _bita
-from database.models import TipoEvento as _TE
-from utils.calculos_financieros import leer_config_financiera
-from decimal import Decimal as _D
+from utils.decimal_utils import D
+from utils.db import sesion
+from database.models import Estadia, Huesped
 
 
 class DialogoCargoExtra:
@@ -29,14 +24,11 @@ class DialogoCargoExtra:
         self._cargo_total = 0.0
         self._titular = None
 
-        sesion = SesionLocal()
-        try:
+        with sesion() as db:
             if self.estadia.huespedes:
-                self._titular = sesion.get(Huesped, self.estadia.huespedes[0].id)
+                self._titular = db.get(Huesped, self.estadia.huespedes[0].id)
                 if self._titular:
                     self._saldo_favor = round(float(self._titular.credito_usd or 0), 2)
-        finally:
-            sesion.close()
 
         self.campo_servicio = ft.TextField(
             label="Descripción del Servicio", expand=True
@@ -151,13 +143,13 @@ class DialogoCargoExtra:
                     estadia_id=self.estadia.id,
                     concepto=f"{nombre_concepto} x{cantidad}",
                     cantidad=1,
-                    precio_unitario_usd=_D(str(monto_cargo)),
+                    precio_unitario_usd=D(str(monto_cargo)),
                     config=config,
                 )
 
                 if titular:
-                    titular.credito_usd = _D(
-                        str(max(_D("0"), _D(str(titular.credito_usd or 0)) - _D(str(monto_aplicar))))
+                    titular.credito_usd = D(
+                        str(max(D("0"), D(str(titular.credito_usd or 0)) - D(str(monto_aplicar))))
                     )
                     titular.credito_origen = ""
 
@@ -178,7 +170,7 @@ class DialogoCargoExtra:
                     folio_engine.crear_saldo_pendiente(
                         sesion,
                         estadia_id=self.estadia.id,
-                        monto_usd=_D(str(monto_restante)),
+                        monto_usd=D(str(monto_restante)),
                         concepto=f"Restante {nombre_concepto}",
                         config=config,
                     )
@@ -189,8 +181,8 @@ class DialogoCargoExtra:
                     sesion,
                     estadia_id=self.estadia.id,
                     concepto=f"Cargo {nombre_concepto} cubierto con {etiqueta_origen}",
-                    monto_usd=_D(str(monto_aplicar)),
-                    tasa=_D(str(tasa)),
+                    monto_usd=D(str(monto_aplicar)),
+                    tasa=D(str(tasa)),
                     referencia=etiqueta_origen.title(),
                     pago_id=None,
                 )
@@ -296,7 +288,7 @@ class DialogoCargoExtra:
                 estadia_id=self.estadia.id,
                 concepto=nombre_concepto,
                 cantidad=cantidad,
-                precio_unitario_usd=_D(str(precio_u)),
+                precio_unitario_usd=D(str(precio_u)),
                 config=config,
             )
 

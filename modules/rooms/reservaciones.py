@@ -5,8 +5,8 @@ Permite ver, crear, confirmar, cancelar y convertir en check-in.
 """
 import flet as ft
 from datetime import datetime, date, timedelta
-from decimal import Decimal
-from database.connection import SesionLocal
+from utils.decimal_utils import Decimal
+from utils.db import sesion
 from database.models import (
     Reservacion, EstadoReservacion, TipoHabitacion, Configuracion,
     Habitacion, EstadoHabitacion, Huesped, Estadia,

@@ -15,6 +15,7 @@ from database.models import (
     Estadia,
     Turno,
     TipoHabitacion,
+    TipoEstadia,
 )
 from sqlalchemy.orm import sessionmaker
 from utils.helpers import hashear_contrasena

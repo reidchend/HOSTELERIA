@@ -8,13 +8,14 @@ La lógica de negocio (cargos, pagos, saldo) vive en:
   modules/finance/engine/taxes.py   → IVA con Decimal
 
 Este módulo mantiene:
-  - leer_config_financiera()  → lee tasa y % IVA de la BD
+  - leer_config_financiera()  → lee tasa y % IVA de la BD (con cache)
   - a_bs() / a_usd()         → conversión de moneda
   - ConfigFinanciera          → dataclass compartido
 """
 
 from dataclasses import dataclass
-from decimal import Decimal, ROUND_HALF_UP
+from functools import lru_cache
+from utils.decimal_utils import Decimal, ROUND_HALF_UP
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -32,10 +33,36 @@ class ConfigFinanciera:
     porcentaje_iva: float = 0.0
 
 
+@lru_cache(maxsize=1)
+def _leer_config_cache(sesion_id) -> ConfigFinanciera:
+    """
+    Versión cacheada. Usa sesion_id como keydummy para que cada sesión
+    obtenga su propia copia cacheada.
+    """
+    from database.models import Configuracion
+    from database.connection import SesionLocal
+
+    sesion = SesionLocal()
+    try:
+        cfg_tasa = sesion.query(Configuracion).filter(
+            Configuracion.clave == "exchange_rate"
+        ).first()
+        cfg_iva = sesion.query(Configuracion).filter(
+            Configuracion.clave == "tax_percentage"
+        ).first()
+
+        return ConfigFinanciera(
+            tasa_cambio=float(cfg_tasa.valor) if cfg_tasa else 1.0,
+            porcentaje_iva=float(cfg_iva.valor) if cfg_iva else 0.0,
+        )
+    finally:
+        sesion.close()
+
+
 def leer_config_financiera(sesion) -> ConfigFinanciera:
     """
     Lee la tasa de cambio y el % de IVA desde la BD.
-    Devuelve valores seguros si las claves no existen.
+    Versión sin cache para transacciones específicas.
     """
     from database.models import Configuracion
 
@@ -47,9 +74,14 @@ def leer_config_financiera(sesion) -> ConfigFinanciera:
     ).first()
 
     return ConfigFinanciera(
-        tasa_cambio    = float(cfg_tasa.valor) if cfg_tasa else 1.0,
-        porcentaje_iva = float(cfg_iva.valor)  if cfg_iva  else 0.0,
+        tasa_cambio=float(cfg_tasa.valor) if cfg_tasa else 1.0,
+        porcentaje_iva=float(cfg_iva.valor) if cfg_iva else 0.0,
     )
+
+
+def get_config_cache() -> ConfigFinanciera:
+    """Obtiene configuración cacheada (para UI sin sesión)."""
+    return _leer_config_cache(0)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

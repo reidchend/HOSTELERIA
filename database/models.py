@@ -196,6 +196,12 @@ class Habitacion(Base):
         return "Vacía"
 
 
+class TipoEstadia(enum.Enum):
+    """Tipo de estadía: por noche o por hora (Operativa)."""
+    NOCHE = "noche"
+    HORARIA = "horaria"
+
+
 class Estadia(Base):
     __tablename__ = "stays"
 
@@ -205,6 +211,9 @@ class Estadia(Base):
     salida = Column(DateTime, nullable=True)
     activa = Column(Boolean, default=True)
     notas = Column(String(1000), nullable=True)
+    tipo = Column(Enum(TipoEstadia), default=TipoEstadia.NOCHE)
+    horas_contratadas = Column(Integer, nullable=True)  # solo para horarias
+    costo_hora = Column(Numeric(12, 4), default=20)  # $20 por hora
 
     habitacion = relationship("Habitacion", back_populates="estadias_activas")
     huespedes = relationship("Huesped", secondary=estadia_huespedes, lazy="selectin")

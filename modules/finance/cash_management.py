@@ -2,7 +2,8 @@
 
 import flet as ft
 from datetime import datetime, date
-from decimal import Decimal
+from utils.decimal_utils import Decimal, to_float
+from utils.db import sesion
 from database.connection import SesionLocal
 from database.models import (
     Caja, Configuracion, Pago, MetodoPago,
@@ -761,6 +762,7 @@ class PantallaGestionCaja(ft.Container):
                     Configuracion.clave == "exchange_rate"
                 ).first()
                 if cfg:
+                    tasa_anterior = float(cfg.valor or 0)
                     cfg.valor = str(nueva)
                     sesion.commit()
                     self.estado_app["exchange_rate"] = nueva
@@ -768,6 +770,20 @@ class PantallaGestionCaja(ft.Container):
                         ft.Text(f"Tasa actualizada: Bs. {nueva:,.2f}"),
                         bgcolor=ft.Colors.GREEN_700,
                     ))
+                    
+                    # Enviar notificación a Telegram
+                    try:
+                        from modules.notifications.formatter import _HOTEL, _SEP
+                        from modules.notifications.dispatcher import enviar_texto
+                        
+                        recep = (self.pagina.session.get("usuario_activo") or {}).get(
+                            "nombre_completo", ""
+                        )
+                        msg = f"{_HOTEL}\n{_SEP}\n🔄 <b>ACTUALIZACIÓN DE TASA</b>\n\n📊 Tasa anterior: Bs. {tasa_anterior:,.2f}\n📊 Nueva tasa: Bs. {nueva:,.2f}\n\n🧑‍💼 Actualizado por: {recep}"
+                        enviar_texto(msg)
+                    except Exception as e:
+                        print(f"[CashManagement] Error enviando Telegram: {e}")
+                    
                     self._refrescar()
             finally:
                 sesion.close()

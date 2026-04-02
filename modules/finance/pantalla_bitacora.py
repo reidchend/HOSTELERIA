@@ -9,8 +9,8 @@ Se actualiza en tiempo real (botón refrescar).
 
 import flet as ft
 from datetime import datetime
-from decimal import Decimal
-from database.connection import SesionLocal
+from utils.decimal_utils import Decimal
+from utils.db import sesion
 from database.models import BitacoraEvento, TipoEvento, Turno, Usuario
 from modules.finance.bitacora import registrar
 from utils.calculos_financieros import a_bs

@@ -16,12 +16,11 @@ Fórmula:
   ≈ 0  → saldado
   < 0  → a favor del huésped (sobrante)
 """
-from decimal import Decimal
+from utils.decimal_utils import Decimal, D
+from utils.db import sesion
 from datetime import datetime
 from sqlalchemy import func
 from database.models import LedgerMovimiento, TipoMovimiento
-
-_D = lambda x: Decimal(str(x))
 
 
 # ── Escritura ────────────────────────────────────────────────────────────────
@@ -41,7 +40,7 @@ def registrar_cargo(
         tipo           = TipoMovimiento.CARGO,
         concepto       = concepto,
         debe_usd       = monto_usd,
-        haber_usd      = _D("0"),
+        haber_usd      = D("0"),
         tasa_cambio    = tasa,
         referencia     = referencia,
         folio_linea_id = folio_linea_id,
@@ -65,7 +64,7 @@ def registrar_pago(
         estadia_id  = estadia_id,
         tipo        = TipoMovimiento.PAGO,
         concepto    = concepto,
-        debe_usd    = _D("0"),
+        debe_usd    = D("0"),
         haber_usd   = monto_usd,
         tasa_cambio = tasa,
         referencia  = referencia,
@@ -90,7 +89,7 @@ def registrar_devolucion(
         estadia_id  = estadia_id,
         tipo        = TipoMovimiento.DEVOLUCION,
         concepto    = concepto,
-        debe_usd    = _D("0"),
+        debe_usd    = D("0"),
         haber_usd   = monto_usd,   # el haber aumenta → reduce la deuda / o genera crédito
         tasa_cambio = tasa,
         referencia  = referencia,
@@ -137,8 +136,8 @@ def saldo_estadia(sesion, estadia_id: int) -> Decimal:
         func.sum(LedgerMovimiento.haber_usd),
     ).filter(LedgerMovimiento.estadia_id == estadia_id).first()
 
-    debe  = _D(str(res[0] or 0))
-    haber = _D(str(res[1] or 0))
+    debe  = D(str(res[0] or 0))
+    haber = D(str(res[1] or 0))
     return debe - haber
 
 

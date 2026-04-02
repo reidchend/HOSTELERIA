@@ -26,8 +26,8 @@ Uso desde cualquier módulo:
     # El commit lo hace el módulo llamador — registrar() solo hace add().
 """
 
+from utils.decimal_utils import Decimal
 from datetime import datetime
-from decimal import Decimal
 from database.models import BitacoraEvento, TipoEvento
 
 

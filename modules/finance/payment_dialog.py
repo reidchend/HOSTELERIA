@@ -60,7 +60,7 @@ CONFIGURACION_METODOS = {
         "etiqueta": "T. Débito",
         "icono": ft.Icons.CREDIT_CARD,
         "color": ft.Colors.ORANGE_700,
-        "es_bs": False,
+        "es_bs": True,
     },
 }
 
@@ -1275,6 +1275,11 @@ class DialogoPago:
         """
         Crea/actualiza el GestorVuelto inline y lo muestra en seccion_sobrante.
         Se llama cada vez que el sobrante cambia en refrescar_interfaz.
+        
+        Opciones:
+        - credito: dejar como saldo a favor del huésped
+        - no_devolver: el cliente dice "quédese con el cambio", no se entrega nada
+        - vuelto: entregar vuelto físicamente
         """
         tasa = self.config.tasa_cambio
 
@@ -1289,19 +1294,23 @@ class DialogoPago:
                 pagina=self.pagina,
             )
 
-        # Opción de crédito vs vuelto físico
+        # Opción de crédito vs.no devolver vs vuelto físico
         sobrante_bs = a_bs(sobrante_usd, tasa)
         radio = ft.RadioGroup(
             content=ft.Column(
                 controls=[
                     ft.Radio(
                         value="credito",
-                        label=f"Dejar ${sobrante_usd:.2f} como saldo a favor del huésped  (Bs. {sobrante_bs:,.2f})",
+                        label=f"Dejar ${sobrante_usd:.2f} como saldo a favor  (Bs. {sobrante_bs:,.2f})",
+                    ),
+                    ft.Radio(
+                        value="no_devolver",
+                        label=f"💰 Dejar como propina — No se entrega nada",
                     ),
                     ft.Radio(value="vuelto", label="Entregar vuelto ahora"),
                 ]
             ),
-            value=getattr(self, "_radio_sobrante_valor", "credito"),
+            value=getattr(self, "_radio_sobrante_valor", "no_devolver"),
         )
         self._radio_sobrante = radio
         panel_gestor = ft.Column(
@@ -1431,12 +1440,15 @@ class DialogoPago:
                 elif pago["metodo"] in [
                     MetodoPago.CASH_USD,
                     MetodoPago.ZELLE,
-                    MetodoPago.DEBIT_CARD,
                 ]:
                     caja.saldo_principal_usd = _D2(
                         str(caja.saldo_principal_usd or 0)
                     ) + _D2(str(pago["monto_usd"]))
-                else:
+                elif pago["metodo"] == MetodoPago.DEBIT_CARD:
+                    # Tarjeta Débito: entra en BS a nuestro banco
+                    caja.saldo_principal_bs = _D2(
+                        str(caja.saldo_principal_bs or 0)
+                    ) + _D2(str(pago["monto_bs"]))
                     caja.saldo_principal_bs = _D2(
                         str(caja.saldo_principal_bs or 0)
                     ) + _D2(str(pago["monto_bs"]))
@@ -1478,8 +1490,33 @@ class DialogoPago:
             elif pendiente < -0.01:
                 monto_sobrante = abs(pendiente)
 
-                modo_sobrante = getattr(self, "_radio_sobrante_valor", "credito")
-                if modo_sobrante == "credito":
+                modo_sobrante = getattr(self, "_radio_sobrante_valor", "no_devolver")
+                
+                if modo_sobrante == "no_devolver":
+                    # El cliente deja el excedente como propina - no se entrega nada
+                    # El sobrante queda en la caja del hotel (ya registrado en caja)
+                    pago_sob = Pago(
+                        estadia_id=self.id_estadia,
+                        monto_usd=monto_sobrante,
+                        monto_bs=a_bs(monto_sobrante, tasa),
+                        es_devolucion=False,  # No es devolución, es propina
+                        metodo=MetodoPago.CASH_BS,
+                        tasa_cambio=tasa,
+                        descripcion="Propina del cliente",
+                        creado_en=datetime.now(),
+                    )
+                    sesion.add(pago_sob)
+                    sesion.flush()
+                    led.registrar_pago(
+                        sesion,
+                        estadia_id=self.id_estadia,
+                        concepto="Propina del cliente",
+                        monto_usd=_D2(str(monto_sobrante)),
+                        tasa=_D2(str(tasa)),
+                        referencia="—",
+                        pago_id=pago_sob.id,
+                    )
+                elif modo_sobrante == "credito":
                     if estadia_bd and estadia_bd.huespedes:
                         titular = sesion.get(Huesped, estadia_bd.huespedes[0].id)
                         if titular:
@@ -1576,16 +1613,25 @@ class DialogoPago:
                     recep = (self.pagina.session.get("usuario_activo") or {}).get(
                         "nombre_completo", ""
                     )
+                    
+                    # Si hay sobrante y se seleccionó "propina", no mostrar pendiente
+                    modo_sobrante = getattr(self, "_radio_sobrante_valor", None)
+                    saldo_a_mostrar = saldo_pendiente_tx
+                    if pendiente < -0.01 and modo_sobrante == "no_devolver":
+                        saldo_a_mostrar = 0  # La propina ya se quedó en caja
+                    
                     msg = pago_respuesta(
                         habitacion=ci["habitacion"],
                         nombre=ci["nombre"],
                         monto_pagado=total_pagado_usd,
                         pagos=self.pagos_sesion,
-                        saldo_pendiente=saldo_pendiente_tx,
+                        saldo_pendiente=saldo_a_mostrar,
                         recepcionista=recep,
                         es_respuesta=reply_to_msg_id is not None,
                         lineas_detalle=self._lineas_detalle,
                         precio_habitacion=ci.get("monto", total_pagado_usd),
+                        es_operativo=ci.get("es_operativo", False),
+                        fecha_salida=ci.get("fecha_salida", ""),
                     )
                     enviar_texto(
                         msg,

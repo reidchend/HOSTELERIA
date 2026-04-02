@@ -120,7 +120,8 @@ def _linea_metodo(p: dict) -> str:
         return f"💵 Efectivo Bs  Bs.{bs:,.2f}"
 
     if "débito" in metodo or "debito" in metodo:
-        txt = f"💳 Tarjeta Débito  ${usd:,.2f}"
+        # Tarjeta Débito: se paga en BS a nuestro banco
+        txt = f"💳 Tarjeta Débito  Bs.{bs:,.2f}"
         if ref:
             txt += f"  Ref:{ref}"
         return txt
@@ -160,6 +161,7 @@ def checkin_mensaje(
     recepcionista: str,
     pagos: list,
     pendiente: bool,
+    es_operativo: bool = False,
 ) -> str:
     """
     Genera el mensaje de Telegram para un check-in con todos sus escenarios:
@@ -178,6 +180,9 @@ def checkin_mensaje(
         💰 $30.00  ✅ cancelado por
            💵 Efectivo $  $15.00
            💸 Zelle  $15.00  Ref:ABC123
+
+    • es_operativo=True:
+        💰 *OP* $20.00  ✅ cancelado por 💳 Tarjeta Débito  Bs [monto en bs]
     """
     lineas = [
         _HOTEL,
@@ -189,35 +194,32 @@ def checkin_mensaje(
     total_abonado = sum(p.get("monto_usd", 0) for p in pagos_hechos)
     saldo_pendiente = precio_usd - total_abonado
 
+    # Formatear precio según tipo
+    if es_operativo:
+        precio_txt = f"<b>*OP* ${precio_usd:,.2f}</b>"
+    else:
+        precio_txt = f"<b>${precio_usd:,.2f}</b>"
+
     if pagos_hechos and saldo_pendiente > 0.01:
         metodos_txt = _formatear_metodos(pagos_hechos)
         if len(pagos_hechos) == 1:
-            lineas.append(
-                f"💰 <b>${precio_usd:,.2f}</b>  ✅ cancelado por {metodos_txt}"
-            )
+            lineas.append(f"💰 {precio_txt}  ✅ cancelado por {metodos_txt}")
         else:
-            lineas.append(
-                f"💰 <b>${precio_usd:,.2f}</b>  ✅ cancelado por\n   {metodos_txt.strip()}"
-            )
+            lineas.append(f"💰 {precio_txt}  ✅ cancelado por\n   {metodos_txt.strip()}")
         lineas.append(f"⏳ Pendiente por cancelar ${saldo_pendiente:,.2f}")
     elif total_abonado > precio_usd + 0.01:
         metodos_txt = _formatear_metodos(pagos_hechos)
-        lineas.append(
-            f"💰 <b>${precio_usd:,.2f}</b>  ✅ cancelado por {metodos_txt}"
-        )
-        lineas.append(f"🔴 Pendiente por devolver ${total_abonado - precio_usd:,.2f}")
+        lineas.append(f"💰 {precio_txt}  ✅ cancelado por {metodos_txt}")
+        if saldo_pendiente > 0.01:
+            lineas.append(f"🔴 Pendiente por devolver ${saldo_pendiente:,.2f}")
     elif pendiente or not pagos_hechos:
-        lineas.append(f"💰 <b>${precio_usd:,.2f}</b>  ⏳ Pendiente por cancelar")
+        lineas.append(f"💰 {precio_txt}  ⏳ Pendiente por cancelar")
     else:
         metodos_txt = _formatear_metodos(pagos_hechos)
         if len(pagos_hechos) == 1:
-            lineas.append(
-                f"💰 <b>${precio_usd:,.2f}</b>  ✅ cancelado por {metodos_txt}"
-            )
+            lineas.append(f"💰 {precio_txt}  ✅ cancelado por {metodos_txt}")
         else:
-            lineas.append(
-                f"💰 <b>${precio_usd:,.2f}</b>  ✅ cancelado por\n   {metodos_txt.strip()}"
-            )
+            lineas.append(f"💰 {precio_txt}  ✅ cancelado por\n   {metodos_txt.strip()}")
 
     # Huésped, recepcionista y estadía
     if nombre:
@@ -225,9 +227,12 @@ def checkin_mensaje(
     if recepcionista:
         lineas.append(_linea("🧑‍💼", "Registrado por", recepcionista))
     if noches > 0 and fecha_salida:
-        lineas.append(
-            f"🌙 {noches} noche{'s' if noches != 1 else ''}  ·  📅 Sal. {fecha_salida}"
-        )
+        if es_operativo:
+            lineas.append(f"🕐 Salida {fecha_salida}")
+        else:
+            lineas.append(
+                f"🌙 {noches} noche{'s' if noches != 1 else ''}  ·  📅 Sal. {fecha_salida}"
+            )
     lineas.append(_hora())
 
     return "\n".join(filter(None, lineas))
@@ -477,6 +482,8 @@ def pago_respuesta(
     es_respuesta: bool = False,
     lineas_detalle: list = None,
     precio_habitacion: float = 0,
+    es_operativo: bool = False,
+    fecha_salida: str = "",
 ) -> str:
     """
     Mensaje de confirmación de pago que responde al mensaje original del check-in.
@@ -486,10 +493,17 @@ def pago_respuesta(
 
     lineas_detalle: lista de dicts con 'concepto' y 'monto' para mostrar desglose.
     precio_habitacion: precio total de la habitación para calcular sobrepago.
+    es_operativo: si es true, muestra mensaje de habitación operativa.
     """
     lineas_detalle = lineas_detalle or []
     precio_real = precio_habitacion if precio_habitacion > 0 else monto_pagado
     sobrepago = -saldo_pendiente if saldo_pendiente < -0.01 else 0
+
+    # Formatear precio según tipo
+    if es_operativo:
+        precio_txt = f"<b>*OP* ${monto_pagado:,.2f}</b>"
+    else:
+        precio_txt = f"<b>${monto_pagado:,.2f}</b>"
 
     if es_respuesta:
         lineas = []
@@ -533,11 +547,12 @@ def pago_respuesta(
             habitacion=habitacion,
             precio_usd=precio_real,
             nombre=nombre,
-            noches=0,
-            fecha_salida="",
+            noches=1 if es_operativo else 0,
+            fecha_salida=fecha_salida,
             recepcionista=recepcionista,
             pagos=pagos,
             pendiente=saldo_pendiente > 0.01,
+            es_operativo=es_operativo,
         )
 
 

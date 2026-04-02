@@ -111,15 +111,38 @@ class GridHabitaciones:
         tiene_deuda = False
         sale_hoy    = False
         nombre_h    = ""
+        hora_salida = ""
+        es_operativa = False
 
         if hab.estado == EstadoHabitacion.OCCUPIED and hab.estadias_activas:
             est = hab.estadias_activas[0]
             tiene_deuda = any(not fl.cancelada for fl in (est.folio_lineas or []))
+            # Verificar si es operativa
+            es_operativa = hasattr(est, 'tipo') and est.tipo and str(est.tipo).endswith('HORARIA')
             if est.salida:
                 salida_d = est.salida.date() if hasattr(est.salida, "date") else est.salida
                 sale_hoy = (salida_d == date.today())
+                # Si es operativa, mostrar hora de salida
+                if es_operativa:
+                    hora_salida = est.salida.strftime("%H:%M") if hasattr(est.salida, 'strftime') else ""
             if est.huespedes:
                 nombre_h = est.huespedes[0].nombre.split()[0].upper()
+
+        # Si es operativa, usar colores azules
+        if es_operativa:
+            cfg = {
+                "label":        "OPERATIVA",
+                "dot":          "#3B82F6",
+                "num_color":    "#EFF6FF",
+                "badge_bg":     "#1E3A8A",
+                "badge_text":   "#93C5FD",
+                "card_border":  "#1D4ED8",
+                "card_top":     "#1E3A8A",
+                "card_bot":     "#172554",
+                "glow":         "#3B82F6",
+                "icono":        ft.Icons.TIMER_ROUNDED,
+                "tipo_color":   "#60A5FA",
+            }
 
         tipo_abrev = _TIPO_ABREV.get((hab.tipo or "").upper(), (hab.tipo or "???")[:3].upper())
         num_str = str(hab.numero).zfill(2)
@@ -156,7 +179,11 @@ class GridHabitaciones:
         )
 
         salida_badge = ft.Container(
-            content=ft.Row([ft.Icon(ft.Icons.FLIGHT_TAKEOFF_ROUNDED, size=8, color="#FFFFFF"), ft.Text("HOY", size=7, weight="bold", color="#FFFFFF")], spacing=2),
+            content=ft.Row(
+                [ft.Icon(ft.Icons.FLIGHT_TAKEOFF_ROUNDED, size=8, color="#FFFFFF"), 
+                 ft.Text(hora_salida if hora_salida else "HOY", size=7, weight="bold", color="#FFFFFF")], 
+                spacing=2
+            ),
             bgcolor="#DC2626", padding=ft.padding.symmetric(horizontal=5, vertical=2), border_radius=15, visible=sale_hoy
         )
 

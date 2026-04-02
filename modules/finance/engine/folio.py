@@ -12,12 +12,11 @@ REGLAS DE IVA:
                  aplica_iva=False; el monto se guarda tal cual.
   - Saldo pendiente: monto plano, sin IVA.
 """
-from decimal import Decimal
+from utils.decimal_utils import Decimal, D
+from utils.db import sesion
 from datetime import datetime
 from database.models import FolioLinea, TipoLinea
 from modules.finance.engine import taxes, ledger as led
-
-_D = lambda x: Decimal(str(x))
 
 
 # ── Creación de líneas ────────────────────────────────────────────────────────
@@ -30,18 +29,22 @@ def crear_linea_hospedaje(
     precio_noche_usd: Decimal,
     config,                        # ConfigFinanciera
     concepto_extra: str = "",
+    aplica_iva: bool = True,
 ) -> FolioLinea:
     """
     Crea una FolioLinea de hospedaje y su asiento CARGO en el ledger.
     El precio_noche_usd es el precio BASE sin IVA.
+    
+    Para habitaciones operativas (por hora), usar aplica_iva=False
+    ya que el precio de $20/hora ya incluye todo.
     """
-    porcentaje_iva = _D(str(config.porcentaje_iva))
-    precio_u       = _D(str(precio_noche_usd))
-    cantidad       = _D(str(noches))
-    tasa           = _D(str(config.tasa_cambio))
+    porcentaje_iva = D(str(config.porcentaje_iva))
+    precio_u       = D(str(precio_noche_usd))
+    cantidad       = D(str(noches))
+    tasa           = D(str(config.tasa_cambio))
 
     subtotal, iva, total = taxes.desglosar_precio(
-        precio_u, cantidad, porcentaje_iva, aplica_iva=True
+        precio_u, cantidad, porcentaje_iva, aplica_iva=aplica_iva
     )
 
     concepto = (
@@ -91,12 +94,12 @@ def crear_cargo_extra(
     Crea una FolioLinea de cargo extra (sin IVA adicional — el monto
     ingresado por el recepcionista ya lo incluye).
     """
-    tasa     = _D(str(config.tasa_cambio))
-    precio_u = _D(str(precio_unitario_usd))
-    cant     = _D(str(cantidad))
+    tasa     = D(str(config.tasa_cambio))
+    precio_u = D(str(precio_unitario_usd))
+    cant     = D(str(cantidad))
 
     subtotal, iva, total = taxes.desglosar_precio(
-        precio_u, cant, _D("0"), aplica_iva=False
+        precio_u, cant, D("0"), aplica_iva=False
     )
 
     concepto_completo = (
@@ -110,7 +113,7 @@ def crear_cargo_extra(
         cantidad            = cant,
         precio_unitario_usd = precio_u,
         aplica_iva          = False,
-        porcentaje_iva      = _D("0"),
+        porcentaje_iva      = D("0"),
         subtotal_usd        = subtotal,
         iva_usd             = iva,
         total_usd           = total,
@@ -142,19 +145,19 @@ def crear_saldo_pendiente(
     Crea una línea de saldo pendiente (deuda de estadías anteriores
     o cobro parcial no saldado).
     """
-    tasa  = _D(str(config.tasa_cambio))
-    monto = _D(str(monto_usd))
+    tasa  = D(str(config.tasa_cambio))
+    monto = D(str(monto_usd))
 
     linea = FolioLinea(
         estadia_id          = estadia_id,
         tipo                = TipoLinea.SALDO_PENDIENTE,
         concepto            = concepto,
-        cantidad            = _D("1"),
+        cantidad            = D("1"),
         precio_unitario_usd = monto,
         aplica_iva          = False,
-        porcentaje_iva      = _D("0"),
+        porcentaje_iva      = D("0"),
         subtotal_usd        = monto,
-        iva_usd             = _D("0"),
+        iva_usd             = D("0"),
         total_usd           = monto,
         cancelada           = False,
         creado_en           = datetime.now(),
@@ -202,7 +205,7 @@ def total_folio(sesion, estadia_id: int) -> Decimal:
     res = sesion.query(func.sum(FolioLinea.total_usd)).filter(
         FolioLinea.estadia_id == estadia_id
     ).scalar()
-    return _D(str(res or 0))
+    return D(str(res or 0))
 
 
 def total_pendiente(sesion, estadia_id: int) -> Decimal:
@@ -212,4 +215,4 @@ def total_pendiente(sesion, estadia_id: int) -> Decimal:
         FolioLinea.estadia_id == estadia_id,
         FolioLinea.cancelada  == False,
     ).scalar()
-    return _D(str(res or 0))
+    return D(str(res or 0))

@@ -4,6 +4,7 @@ import flet as ft
 from datetime import datetime, timedelta
 from database.connection import SesionLocal
 from utils.calculos_financieros import leer_config_financiera
+from utils import handle_error
 from database.models import (
     Habitacion,
     EstadoHabitacion,
@@ -13,7 +14,7 @@ from database.models import (
 )
 from modules.finance.engine import folio as folio_engine
 from modules.finance.bitacora import registrar as _bita
-from database.models import TipoEvento
+from database.models import TipoEvento, TipoEstadia
 from modules.finance.payment_dialog import DialogoPago
 
 
@@ -43,9 +44,11 @@ class DialogoCheckIn:
         self.estadia_actual = None
         self.total_calculado = 0.0
         self._hab_numero = habitacion.numero  # para el mensaje
+        self._es_horaria = False  # tipo de habitación (Operativa)
 
         # ── Campos de fecha ─────────────────────────────────────────────────
         fecha_hoy = datetime.now().strftime("%Y-%m-%d")
+        hora_hoy = datetime.now().strftime("%H:%M")
         fecha_sal = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
         print(f"[CheckIn] INIT: hoy={fecha_hoy}, salida={fecha_sal}")
 
@@ -56,6 +59,14 @@ class DialogoCheckIn:
             expand=1,
             prefix_icon=ft.Icons.LOGIN,
         )
+        self.campo_hora_entrada = ft.TextField(
+            label="Hora",
+            value=hora_hoy,
+            width=90,
+            prefix_icon=ft.Icons.SCHEDULE,
+            visible=False,
+            on_submit=lambda _: self.campo_documento.focus(),
+        )
         manana = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
         self.campo_salida = ft.TextField(
             label="Salida Estimada",
@@ -63,6 +74,21 @@ class DialogoCheckIn:
             expand=1,
             prefix_icon=ft.Icons.LOGOUT,
             on_submit=lambda _: self.campo_documento.focus(),
+            visible=True,
+        )
+
+        # ── Checkbox Habitación por Hora (Operativa) ────────────────────────
+        self.chk_operativa = ft.Switch(
+            label="Habitación Operativa ($20 - IVA incl.)",
+            on_change=self.on_change_operativa,
+        )
+        self.label_info_operativa = ft.Container(
+            content=ft.Text(
+                "💡 Máximo 3 horas. Si necesita más tiempo, debe rentar la habitación por noche.",
+                size=12,
+                color=ft.Colors.BLUE_700,
+            ),
+            visible=False,
         )
 
         # ── Campos del huésped titular ──────────────────────────────────────
@@ -105,6 +131,81 @@ class DialogoCheckIn:
     # ─────────────────────────────────────────────────────────────────────────
     # BÚSQUEDA DE HUÉSPEDES
     # ─────────────────────────────────────────────────────────────────────────
+
+    def on_change_operativa(self, evento):
+        """Maneja el cambio del switch de habitación operativa."""
+        self._es_horaria = self.chk_operativa.value
+        self.campo_hora_entrada.visible = self._es_horaria
+        self.label_info_operativa.visible = self._es_horaria
+        
+        if self._es_horaria:
+            hora_ent = self.campo_hora_entrada.value or datetime.now().strftime("%H:%M")
+            self.campo_salida.value = f"{hora_ent} + 3h"
+            self.campo_salida.label = "Salida (entrada + 3h)"
+            self.campo_salida.read_only = True
+            self.btn_guardar.text = "Registrar Habitación Operativa"
+        else:
+            manana = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+            self.campo_salida.value = manana
+            self.campo_salida.label = "Salida Estimada"
+            self.campo_salida.read_only = False
+            self.btn_guardar.text = "Registrar Estadía"
+        
+        # Reconstruir el diálogo con la nueva estructura
+        self.dialogo.content = self.construir_contenido()
+        self.dialogo.title = ft.Text(
+            f"Check-In Operativo — Habitación {self.habitacion.numero}"
+            if self._es_horaria
+            else f"Check-In — Habitación {self.habitacion.numero}"
+        )
+        self.dialogo.update()
+
+    def construir_contenido(self):
+        """Construye el contenido del diálogo según el modo."""
+        if self._es_horaria:
+            seccion_fechas = ft.Column([
+                ft.Text("Entrada", size=12, weight="bold", color="blue"),
+                ft.Row([self.campo_entrada, self.campo_hora_entrada], spacing=10),
+                ft.Text("Salida", size=12, weight="bold", color="blue"),
+                self.campo_salida,
+            ], spacing=5)
+        else:
+            seccion_fechas = ft.Column([
+                ft.Text("Entrada", size=12, weight="bold", color="blue"),
+                self.campo_entrada,
+                ft.Text("Salida Estimada", size=12, weight="bold", color="blue"),
+                self.campo_salida,
+            ], spacing=5)
+        
+        return ft.Container(
+            width=700,
+            content=ft.Column(
+                [
+                    self.chk_operativa,
+                    self.label_info_operativa,
+                    seccion_fechas,
+                    ft.Divider(),
+                    ft.Text("Datos del Titular", weight="bold", color="blue"),
+                    self.campo_documento,
+                    ft.Row([self.campo_nombre, self.campo_apellido]),
+                    ft.Row([self.campo_fecha_nac, self.campo_nacionalidad]),
+                    ft.Row([self.campo_profesion, self.campo_telefono]),
+                    self.campo_vehiculo,
+                    ft.Divider(),
+                    ft.Row(
+                        [
+                            ft.Text("Acompañantes", weight="bold", color="blue"),
+                            self.btn_agregar_acompanante,
+                        ],
+                        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                    ),
+                    self.contenedor_acompanantes,
+                ],
+                scroll=ft.ScrollMode.AUTO,
+                tight=True,
+                spacing=15,
+            ),
+        )
 
     def evento_buscar_huesped(self, evento):
         self.buscar_huesped(evento)
@@ -325,10 +426,10 @@ class DialogoCheckIn:
             for fila in self.controles_acompanantes:
                 doc = fila.controls[0].value
                 nombre = fila.controls[1].value
-                apell = fila.controls[2].value
+                appell = fila.controls[2].value
                 if doc and nombre:
                     acomp = self.obtener_o_crear_huesped(
-                        sesion, doc, nombre, apell, es_titular=False
+                        sesion, doc, nombre, appell, es_titular=False
                     )
                     lista_huespedes.append(acomp)
 
@@ -339,45 +440,125 @@ class DialogoCheckIn:
             )
             habitacion_bd.estado = EstadoHabitacion.OCCUPIED
 
-            fecha_entrada = datetime.strptime(self.campo_entrada.value, "%Y-%m-%d")
-            fecha_salida = datetime.strptime(self.campo_salida.value, "%Y-%m-%d")
-            print(
-                f"[CheckIn] DEBUG: entrada={self.campo_entrada.value}, salida={self.campo_salida.value}"
-            )
-            noches = max(1, (fecha_salida - fecha_entrada).days)
-            precio_noche = (
-                habitacion_bd.precio_actual_usd or habitacion_bd.precio_base_usd
-            )
+            if self._es_horaria:
+                self._guardar_checkin_operativo(sesion, habitacion_bd, lista_huespedes)
+            else:
+                self._guardar_checkin_noche(sesion, habitacion_bd, lista_huespedes)
 
-            self.estadia_actual = Estadia(
-                habitacion_id=habitacion_bd.id,
-                entrada=fecha_entrada,
-                salida=fecha_salida,
-                activa=True,
+        except Exception as error:
+            sesion.rollback()
+            handle_error(error, self.pagina, "Check-In")
+            self.pagina.open(
+                ft.SnackBar(ft.Text(f"Error en Check-In: {error}"), bgcolor="red")
             )
-            self.estadia_actual.huespedes = lista_huespedes
-            sesion.add(self.estadia_actual)
-            sesion.flush()
+        finally:
+            sesion.close()
 
-            config = leer_config_financiera(sesion)
-            linea_hosp = folio_engine.crear_linea_hospedaje(
-                sesion,
-                estadia_id=self.estadia_actual.id,
-                habitacion_numero=habitacion_bd.numero,
-                noches=noches,
-                precio_noche_usd=precio_noche,
-                config=config,
-                concepto_extra=(
-                    f"Hospedaje — Hab. {habitacion_bd.numero} "
-                    f"({noches} noche{'s' if noches > 1 else ''}) "
-                    f"del {fecha_entrada.strftime('%d/%m/%Y')} "
-                    f"al {fecha_salida.strftime('%d/%m/%Y')}"
-                ),
-            )
-            monto_total = float(linea_hosp.total_usd)
+    def _guardar_checkin_noche(self, sesion, habitacion_bd, lista_huespedes):
+        """Lógica original para check-in por noche."""
+        fecha_entrada = datetime.strptime(self.campo_entrada.value, "%Y-%m-%d")
+        fecha_salida = datetime.strptime(self.campo_salida.value, "%Y-%m-%d")
+        
+        noches = max(1, (fecha_salida - fecha_entrada).days)
+        precio_noche = float(habitacion_bd.precio_actual_usd or habitacion_bd.precio_base_usd or 0)
 
-            from decimal import Decimal
+        self.estadia_actual = Estadia(
+            habitacion_id=habitacion_bd.id,
+            entrada=fecha_entrada,
+            salida=fecha_salida,
+            activa=True,
+            tipo=TipoEstadia.NOCHE,
+        )
+        self.estadia_actual.huespedes = lista_huespedes
+        sesion.add(self.estadia_actual)
+        sesion.flush()
 
+        config = leer_config_financiera(sesion)
+        linea_hosp = folio_engine.crear_linea_hospedaje(
+            sesion,
+            estadia_id=self.estadia_actual.id,
+            habitacion_numero=habitacion_bd.numero,
+            noches=noches,
+            precio_noche_usd=precio_noche,
+            config=config,
+            concepto_extra=(
+                f"Hospedaje — Hab. {habitacion_bd.numero} "
+                f"({noches} noche{'s' if noches > 1 else ''}) "
+                f"del {fecha_entrada.strftime('%d/%m/%Y')} "
+                f"al {fecha_salida.strftime('%d/%m/%Y')}"
+            ),
+        )
+        self._procesar_post_checkin(sesion, habitacion_bd, linea_hosp, noches)
+
+    def _guardar_checkin_operativo(self, sesion, habitacion_bd, lista_huespedes):
+        """Lógica para check-in por hora (Habitacion Operativa)."""
+        hora_entrada_str = self.campo_hora_entrada.value or datetime.now().strftime("%H:%M")
+        
+        # La hora de salida se calcula automáticamente: entrada + 3 horas
+        fecha_hoy = datetime.now().strftime("%Y-%m-%d")
+        fecha_entrada = datetime.strptime(f"{fecha_hoy} {hora_entrada_str}", "%Y-%m-%d %H:%M")
+        fecha_salida = fecha_entrada + timedelta(hours=3)
+        hora_salida_str = fecha_salida.strftime("%H:%M")
+        
+        fecha_hoy = datetime.now().strftime("%Y-%m-%d")
+        fecha_entrada = datetime.strptime(f"{fecha_hoy} {hora_entrada_str}", "%Y-%m-%d %H:%M")
+        fecha_salida = datetime.strptime(f"{fecha_hoy} {hora_salida_str}", "%Y-%m-%d %H:%M")
+        
+        horas_totales = int((fecha_salida - fecha_entrada).total_seconds() / 3600)
+        horas_totales = max(3, horas_totales)  # mínimo 3 horas
+        
+        # Precio FIJO de habitación operativa: $20 (IVA incluido)
+        # No se vende por hora adicional - si quiere más tiempo, debe pagar habitación completa
+        precio_operativo = 20.0
+        cantidad = 1  # Una habitación operativa, no por horas
+        
+        print(f"[CheckIn Operativo] Habitación operativa: ${precio_operativo} (IVA incl.) - {horas_totales}h最大")
+
+        self.estadia_actual = Estadia(
+            habitacion_id=habitacion_bd.id,
+            entrada=fecha_entrada,
+            salida=fecha_salida,
+            activa=True,
+            tipo=TipoEstadia.HORARIA,
+            horas_contratadas=horas_totales,
+            costo_hora=precio_operativo,
+        )
+        self.estadia_actual.huespedes = lista_huespedes
+        sesion.add(self.estadia_actual)
+        sesion.flush()
+
+        config = leer_config_financiera(sesion)
+        linea_hosp = folio_engine.crear_linea_hospedaje(
+            sesion,
+            estadia_id=self.estadia_actual.id,
+            habitacion_numero=habitacion_bd.numero,
+            noches=cantidad,
+            precio_noche_usd=precio_operativo,
+            config=config,
+            concepto_extra=(
+                f"Hospedaje OPERATIVO — Hab. {habitacion_bd.numero} "
+                f"$20 (IVA incl.) {fecha_entrada.strftime('%d/%m/%Y %H:%M')} - {hora_salida_str}"
+            ),
+            aplica_iva=False,
+        )
+        self._procesar_post_checkin(sesion, habitacion_bd, linea_hosp, horas_totales, es_operativo=True, fecha_entrada=fecha_entrada)
+
+    def _procesar_post_checkin(self, sesion, habitacion_bd, linea_hosp, cantidad, es_operativo=False, fecha_entrada=None):
+        """Procesa post check-in: bitácora, totales, etc."""
+        from decimal import Decimal
+        from database.models import Huesped
+        
+        monto_total = float(linea_hosp.total_usd)
+        
+        self._monto_total = monto_total
+        self._noches = cantidad
+        self._nombre_titular = self.campo_nombre.value
+        self._es_operativo = es_operativo
+        
+        # Obtener el titular de la lista de huéspedes
+        titular = self.estadia_actual.huespedes[0] if self.estadia_actual.huespedes else None
+        
+        if titular:
             titular_bd_fresco = sesion.get(Huesped, titular.id)
             credito = (
                 Decimal(str(titular_bd_fresco.credito_usd or 0))
@@ -391,32 +572,29 @@ class DialogoCheckIn:
                     estadia_id=self.estadia_actual.id,
                     monto_usd=deuda_anterior,
                     concepto="Deuda de estadías anteriores",
-                    config=config,
+                    config=leer_config_financiera(sesion),
                 )
                 titular_bd_fresco.credito_usd = Decimal("0")
 
-            # ── Guardar datos para el mensaje posterior ──────────────────────
-            self._hab_numero = habitacion_bd.numero
-            self._monto_total = monto_total
-            self._nombre_titular = titular.nombre_completo
-            self._noches = noches
-            self._fecha_salida = fecha_salida.strftime("%d/%m/%Y")
-            self._estadia_id = self.estadia_actual.id
-            self._bitacora_event_id = None  # Se guarda cuando se crea el evento
+        # ── Guardar datos para el mensaje posterior ──────────────────────
+        self._hab_numero = habitacion_bd.numero
+        self._monto_total = monto_total
+        self._nombre_titular = self.campo_nombre.value
+        self._noches = cantidad
+        # Para operativas: calcular hora de salida = entrada + 3 horas
+        if es_operativo:
+            hora_salida_dt = fecha_entrada + timedelta(hours=3)
+            self._fecha_salida = hora_salida_dt.strftime("%H:%M")
+        else:
+            self._fecha_salida = self.campo_salida.value
+        self._estadia_id = self.estadia_actual.id
+        self._bitacora_event_id = None  # Se guarda cuando se crea el evento
 
-            sesion.commit()
-            sesion.refresh(self.estadia_actual)
-            self.total_calculado = monto_total
-            self.pagina.close(self.dialogo)
-            self.preguntar_por_pago()
-
-        except Exception as error:
-            sesion.rollback()
-            self.pagina.open(
-                ft.SnackBar(ft.Text(f"Error en Check-In: {error}"), bgcolor="red")
-            )
-        finally:
-            sesion.close()
+        sesion.commit()
+        sesion.refresh(self.estadia_actual)
+        self.total_calculado = monto_total
+        self.pagina.close(self.dialogo)
+        self.preguntar_por_pago()
 
     # ─────────────────────────────────────────────────────────────────────────
     # DECISIÓN DE PAGO
@@ -486,6 +664,7 @@ class DialogoCheckIn:
                     "noches": self._noches,
                     "fecha_salida": self._fecha_salida,
                     "bitacora_event_id": self._bitacora_event_id,
+                    "es_operativo": self._es_operativo,
                 },
             )
             modulo_pago.mostrar()
@@ -540,6 +719,7 @@ class DialogoCheckIn:
                     recepcionista=recep,
                     pagos=[],
                     pendiente=True,
+                    es_operativo=self._es_operativo,
                 )
                 exito, msg_id = tg.enviar_mensaje(msg)
                 if exito and msg_id and bitacora_id:
@@ -609,35 +789,15 @@ class DialogoCheckIn:
     # ─────────────────────────────────────────────────────────────────────────
 
     def construir(self) -> ft.AlertDialog:
+        titulo = (
+            f"Check-In Operativo — Habitación {self.habitacion.numero}"
+            if self._es_horaria
+            else f"Check-In — Habitación {self.habitacion.numero}"
+        )
+        
         return ft.AlertDialog(
-            title=ft.Text(f"Check-In — Habitación {self.habitacion.numero}"),
-            content=ft.Container(
-                width=700,
-                content=ft.Column(
-                    [
-                        ft.Row([self.campo_entrada, self.campo_salida]),
-                        ft.Divider(),
-                        ft.Text("Datos del Titular", weight="bold", color="blue"),
-                        self.campo_documento,
-                        ft.Row([self.campo_nombre, self.campo_apellido]),
-                        ft.Row([self.campo_fecha_nac, self.campo_nacionalidad]),
-                        ft.Row([self.campo_profesion, self.campo_telefono]),
-                        self.campo_vehiculo,
-                        ft.Divider(),
-                        ft.Row(
-                            [
-                                ft.Text("Acompañantes", weight="bold", color="blue"),
-                                self.btn_agregar_acompanante,
-                            ],
-                            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-                        ),
-                        self.contenedor_acompanantes,
-                    ],
-                    scroll=ft.ScrollMode.AUTO,
-                    tight=True,
-                    spacing=15,
-                ),
-            ),
+            title=ft.Text(titulo),
+            content=self.construir_contenido(),
             actions=[
                 ft.TextButton(
                     "Cancelar", on_click=lambda _: self.pagina.close(self.dialogo)

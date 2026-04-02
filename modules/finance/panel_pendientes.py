@@ -8,9 +8,8 @@ Cada item lleva los IDs necesarios para ejecutar la baja:
 """
 
 import flet as ft
-from decimal import Decimal
-from datetime import datetime
-from database.connection import SesionLocal
+from utils.decimal_utils import Decimal
+from utils.db import sesion
 from database.models import Huesped, Estadia, FolioLinea
 from sqlalchemy.orm import selectinload
 from utils.calculos_financieros import a_bs

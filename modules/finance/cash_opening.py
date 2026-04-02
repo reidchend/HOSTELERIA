@@ -5,6 +5,7 @@ from datetime import datetime
 from database.connection import SesionLocal
 from database.models import Caja, Configuracion, Turno, TipoEvento
 from modules.finance.bitacora import registrar as _bita
+from utils import handle_error
 
 
 class DialogoAperturaTurno:
@@ -171,6 +172,7 @@ class DialogoAperturaTurno:
             ))
         except Exception as error:
             sesion.rollback()
+            handle_error(error, self.pagina, "Apertura turno")
             self.pagina.open(ft.SnackBar(
                 ft.Text(f"Error al abrir turno: {error}"),
                 bgcolor=ft.Colors.RED_700,

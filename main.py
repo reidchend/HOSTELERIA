@@ -6,6 +6,7 @@ from modules.auth.login import PantallaLogin
 from modules.rooms.management import GridHabitaciones
 from modules.rooms.details import DialogoDetallesHabitacion
 from utils.helpers import cargar_configuracion_bd
+from utils import handle_error
 from modules.finance.cash_opening import DialogoAperturaTurno
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -76,7 +77,8 @@ def principal(pagina: ft.Page):
     sesion_inicio = SesionLocal()
     try:
         config_inicial = cargar_configuracion_bd(sesion_inicio)
-    except Exception:
+    except Exception as e:
+        handle_error(e, pagina, "Cargar config inicial")
         config_inicial = {}
     finally:
         sesion_inicio.close()
