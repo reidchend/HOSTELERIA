@@ -672,6 +672,10 @@ def checkin_grupal_mensaje(
         f"📛 {nombre_grupo}",
     ]
     
+    # Habitaciones primero
+    hab_numeros = ", ".join([str(h.get("numero", "")) for h in habitaciones])
+    lineas.append(_linea("🏠", "Habitaciones", hab_numeros))
+    
     pagos_hechos = pagos if pagos else []
     total_abonado = sum(p.get("monto_usd", 0) for p in pagos_hechos)
     saldo_pendiente = total_grupo - total_abonado
@@ -680,30 +684,22 @@ def checkin_grupal_mensaje(
     
     if pagos_hechos and saldo_pendiente > 0.01:
         metodos_txt = _formatear_metodos(pagos_hechos)
-        if len(pagos_hechos) == 1:
-            lineas.append(f"💰 {precio_txt}  ✅ cancelado por {metodos_txt}")
-        else:
-            lineas.append(f"💰 {precio_txt}  ✅ cancelado por\n   {metodos_txt.strip()}")
+        lineas.append(f"💰 {precio_txt}  ✅ cancelado por\n   {metodos_txt.strip()}")
         lineas.append(f"⏳ Pendiente por cancelar ${saldo_pendiente:,.2f}")
     elif total_abonado > total_grupo + 0.01:
         metodos_txt = _formatear_metodos(pagos_hechos)
-        lineas.append(f"💰 {precio_txt}  ✅ cancelado por {metodos_txt}")
+        lineas.append(f"💰 {precio_txt}  ✅ cancelado por\n   {metodos_txt.strip()}")
         if saldo_pendiente > 0.01:
             lineas.append(f"🔴 Pendiente por devolver ${abs(saldo_pendiente):,.2f}")
     elif pendiente or not pagos_hechos:
         lineas.append(f"💰 {precio_txt}  ⏳ Pendiente por cancelar")
     else:
         metodos_txt = _formatear_metodos(pagos_hechos)
-        if len(pagos_hechos) == 1:
-            lineas.append(f"💰 {precio_txt}  ✅ cancelado por {metodos_txt}")
-        else:
-            lineas.append(f"💰 {precio_txt}  ✅ cancelado por\n   {metodos_txt.strip()}")
+        lineas.append(f"💰 {precio_txt}  ✅ cancelado por\n   {metodos_txt.strip()}")
     
+    # Huésped principal después de los pagos
     if huesped_principal:
         lineas.append(_linea("👥", "Huésped principal", huesped_principal))
-    
-    hab_numeros = ", ".join([str(h.get("numero", "")) for h in habitaciones])
-    lineas.append(_linea("🏠", "Habitaciones", hab_numeros))
     
     if noches > 0 and fecha_salida:
         lineas.append(f"🌙 {noches} noche{'s' if noches != 1 else ''}  ·  📅 Sal. {fecha_salida}")

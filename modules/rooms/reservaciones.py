@@ -7,6 +7,7 @@ import flet as ft
 from datetime import datetime, date, timedelta
 from utils.decimal_utils import Decimal
 from utils.db import sesion
+from database.connection import SesionLocal
 from database.models import (
     Reservacion, EstadoReservacion, TipoHabitacion, Configuracion,
     Habitacion, EstadoHabitacion, Huesped, Estadia,

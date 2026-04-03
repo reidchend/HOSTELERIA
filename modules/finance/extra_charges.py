@@ -3,7 +3,12 @@
 import flet as ft
 from utils.decimal_utils import D
 from utils.db import sesion
-from database.models import Estadia, Huesped
+from database.models import Estadia, Huesped, Habitacion, BitacoraEvento, TipoEvento as _TE
+from database.connection import SesionLocal
+from utils.calculos_financieros import leer_config_financiera
+from modules.finance.engine import folio as folio_engine
+from modules.finance.engine import ledger as led
+from modules.finance.bitacora import registrar as _bita
 
 
 class DialogoCargoExtra:

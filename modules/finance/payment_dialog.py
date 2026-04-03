@@ -95,6 +95,7 @@ class DialogoPago:
         al_completar,
         lineas_ids=None,
         checkin_info=None,
+        al_cancelar=None,
     ):
         self.pagina = pagina
         self.estadia = estadia
@@ -105,6 +106,7 @@ class DialogoPago:
         # Datos del check-in para registrar el mensaje final en bitácora.
         # Si es None, el pago proviene de details.py (no de un check-in nuevo).
         self.checkin_info = checkin_info
+        self.al_cancelar = al_cancelar  # Callback cuando se cancela sin pagar
         self.dialogo = None
 
         sesion = SesionLocal()
@@ -123,6 +125,64 @@ class DialogoPago:
         self._gestor_vuelto = None
         self._campo_telefono_pm = None
         self._lineas_detalle = self._cargar_lineas_detalle()
+
+    def _on_cancelar(self, _):
+        """Maneja el cierre del diálogo de pago. Si es un check-in grupal pendiente, envía el mensaje."""
+        ci = self.checkin_info
+        if ci and ci.get("es_grupo") and not self.pagos_sesion:
+            # No se realizó ningún pago — enviar mensaje de cuenta pendiente
+            try:
+                from modules.notifications.formatter import checkin_grupal_mensaje
+                from modules.notifications import telegram as tg
+                from modules.notifications.dispatcher import guardar_telegram_message_id
+                from modules.finance.bitacora import registrar as _bita
+                from database.models import TipoEvento, BitacoraEvento
+                from database.connection import SesionLocal
+                
+                sesion = SesionLocal()
+                bitacora_id = None
+                try:
+                    evento = _bita(
+                        sesion=sesion,
+                        pagina=self.pagina,
+                        tipo=TipoEvento.CHECKIN,
+                        concepto=f"CHECK-IN GRUPO '{ci.get('nombre_grupo', '')}' ${ci.get('monto', 0):.2f} pendiente por cancelar",
+                        habitacion=f"Grupo {ci.get('nombre_grupo', '')}",
+                        monto_usd=ci.get("monto", 0),
+                        confirmado=False,
+                        notificar_telegram=False,
+                        retornar_evento=True,
+                    )
+                    if evento:
+                        bitacora_id = evento.id
+                    sesion.commit()
+                except Exception as e:
+                    sesion.rollback()
+                    print(f"[PaymentDialog] Error bitácora cancelar grupal: {e}")
+                finally:
+                    sesion.close()
+                
+                recep = (self.pagina.session.get("usuario_activo") or {}).get("nombre_completo", "")
+                msg = checkin_grupal_mensaje(
+                    nombre_grupo=ci.get("nombre_grupo", ""),
+                    habitaciones=ci.get("habitaciones_data", []),
+                    huesped_principal=ci.get("nombre", ""),
+                    total_grupo=ci.get("monto", 0),
+                    noches=ci.get("noches", 1),
+                    fecha_salida=ci.get("fecha_salida", ""),
+                    recepcionista=recep,
+                    pendiente=True,
+                    pagos=[],
+                )
+                exito, msg_id = tg.enviar_mensaje(msg)
+                if exito and msg_id and bitacora_id:
+                    guardar_telegram_message_id(bitacora_id, str(msg_id))
+            except Exception as e:
+                print(f"[PaymentDialog] Error Telegram cancelar grupal: {e}")
+        
+        self.pagina.close(self.dialogo)
+        if self.al_cancelar:
+            self.al_cancelar()
 
     def _cargar_lineas_detalle(self):
         """Carga los detalles de las líneas que se van a cobrar."""
@@ -253,7 +313,7 @@ class DialogoPago:
             content=ft.Container(content=cuerpo, width=880, height=540),
             actions=[
                 ft.TextButton(
-                    "Cancelar", on_click=lambda _: self.pagina.close(self.dialogo)
+                    "Cancelar", on_click=self._on_cancelar
                 ),
                 self.btn_finalizar,
             ],
@@ -1607,32 +1667,49 @@ class DialogoPago:
                 )
 
                 try:
-                    from modules.notifications.formatter import pago_respuesta
+                    from modules.notifications.formatter import pago_respuesta, checkin_grupal_mensaje
                     from modules.notifications.dispatcher import enviar_texto
 
                     recep = (self.pagina.session.get("usuario_activo") or {}).get(
                         "nombre_completo", ""
                     )
                     
-                    # Si hay sobrante y se seleccionó "propina", no mostrar pendiente
-                    modo_sobrante = getattr(self, "_radio_sobrante_valor", None)
-                    saldo_a_mostrar = saldo_pendiente_tx
-                    if pendiente < -0.01 and modo_sobrante == "no_devolver":
-                        saldo_a_mostrar = 0  # La propina ya se quedó en caja
-                    
-                    msg = pago_respuesta(
-                        habitacion=ci["habitacion"],
-                        nombre=ci["nombre"],
-                        monto_pagado=total_pagado_usd,
-                        pagos=self.pagos_sesion,
-                        saldo_pendiente=saldo_a_mostrar,
-                        recepcionista=recep,
-                        es_respuesta=reply_to_msg_id is not None,
-                        lineas_detalle=self._lineas_detalle,
-                        precio_habitacion=ci.get("monto", total_pagado_usd),
-                        es_operativo=ci.get("es_operativo", False),
-                        fecha_salida=ci.get("fecha_salida", ""),
-                    )
+                    # Si es un check-in grupal, usar el formato grupal
+                    if ci.get("es_grupo"):
+                        habitaciones_data = ci.get("habitaciones_data", [])
+                        nombre_grupo = ci.get("nombre_grupo", ci.get("habitacion", "Grupo"))
+                        
+                        msg = checkin_grupal_mensaje(
+                            nombre_grupo=nombre_grupo,
+                            habitaciones=habitaciones_data,
+                            huesped_principal=ci.get("nombre", ""),
+                            total_grupo=ci.get("monto", total_pagado_usd),
+                            noches=ci.get("noches", 1),
+                            fecha_salida=ci.get("fecha_salida", ""),
+                            recepcionista=recep,
+                            pagos=self.pagos_sesion,
+                            pendiente=False,
+                        )
+                    else:
+                        # Si hay sobrante y se seleccionó "propina", no mostrar pendiente
+                        modo_sobrante = getattr(self, "_radio_sobrante_valor", None)
+                        saldo_a_mostrar = saldo_pendiente_tx
+                        if pendiente < -0.01 and modo_sobrante == "no_devolver":
+                            saldo_a_mostrar = 0  # La propina ya se quedó en caja
+                        
+                        msg = pago_respuesta(
+                            habitacion=ci["habitacion"],
+                            nombre=ci["nombre"],
+                            monto_pagado=total_pagado_usd,
+                            pagos=self.pagos_sesion,
+                            saldo_pendiente=saldo_a_mostrar,
+                            recepcionista=recep,
+                            es_respuesta=reply_to_msg_id is not None,
+                            lineas_detalle=self._lineas_detalle,
+                            precio_habitacion=ci.get("monto", total_pagado_usd),
+                            es_operativo=ci.get("es_operativo", False),
+                            fecha_salida=ci.get("fecha_salida", ""),
+                        )
                     enviar_texto(
                         msg,
                         reply_to_message_id=reply_to_msg_id,

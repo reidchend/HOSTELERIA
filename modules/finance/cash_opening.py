@@ -61,8 +61,17 @@ class DialogoAperturaTurno:
             value=f"{self.tasa_actual:.2f}",
             expand=True,
         )
+        
+        self._procesando = False
 
     def confirmar_apertura(self, evento):
+        if self._procesando:
+            return
+        self._procesando = True
+        
+        # Cerrar el modal inmediatamente para evitar doble cliqueo
+        self.pagina.close(self.dialogo)
+        
         sesion = SesionLocal()
         try:
             usd_fisico     = float(self.campo_usd.value)
@@ -159,6 +168,7 @@ class DialogoAperturaTurno:
                 print("[AperturaTurno] Sin cambios en caja chica — movimiento omitido.")
 
             self.pagina.close(self.dialogo)
+            self.pagina.update()  # Forzar actualización
             self.al_completar(tasa_ingresada)
             self.pagina.open(ft.SnackBar(
                 ft.Text("Turno abierto y caja sincronizada"),
@@ -166,12 +176,15 @@ class DialogoAperturaTurno:
             ))
 
         except ValueError:
+            self.pagina.close(self.dialogo)
             self.pagina.open(ft.SnackBar(
                 ft.Text("Error: Ingrese montos numéricos válidos"),
                 bgcolor=ft.Colors.RED_700,
             ))
+            self._procesando = False
         except Exception as error:
             sesion.rollback()
+            self.pagina.close(self.dialogo)
             handle_error(error, self.pagina, "Apertura turno")
             self.pagina.open(ft.SnackBar(
                 ft.Text(f"Error al abrir turno: {error}"),
@@ -179,6 +192,7 @@ class DialogoAperturaTurno:
             ))
         finally:
             sesion.close()
+            self._procesando = False
 
     def mostrar(self):
         if self.turno_existente:

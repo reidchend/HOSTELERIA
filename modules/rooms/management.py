@@ -253,9 +253,27 @@ class GridHabitaciones:
             return
         n = len(self.habitaciones_seleccionadas)
         self._btn_accion.disabled = n < 1
-        # controls[0] es el Text, controls[1] es el Row
+        # controls[0] es el Text
         self._barra_seleccion.content.controls[0].value = f" {n} seleccionada(s)"
+        self._barra_seleccion.visible = self.modo_seleccion
         self._barra_seleccion.update()
+
+    def alternar_seleccion(self):
+        self.modo_seleccion = not self.modo_seleccion
+        if not self.modo_seleccion:
+            self.habitaciones_seleccionadas.clear()
+        self._actualizar_grid()
+        # Forzar actualización de la barra de selección
+        if self._barra_seleccion:
+            self._barra_seleccion.visible = self.modo_seleccion
+            self._actualizar_barra_seleccion()
+        return self.modo_seleccion
+
+    def _cancelar_seleccion(self, _=None):
+        self.modo_seleccion = False
+        self.habitaciones_seleccionadas.clear()
+        self._actualizar_grid()
+        self._actualizar_barra_seleccion()
 
     def _actualizar_grid(self):
         sesion = SesionLocal()
@@ -287,25 +305,10 @@ class GridHabitaciones:
                 habs = sesion.query(Habitacion).filter(
                     Habitacion.id.in_(self.habitaciones_seleccionadas)
                 ).all()
-                nums = [h.numero for h in habs]
                 self.al_crear_grupo(habs)
             finally:
                 sesion.close()
         self._cancelar_seleccion()
-
-    def _cancelar_seleccion(self, _=None):
-        self.modo_seleccion = False
-        self.habitaciones_seleccionadas.clear()
-        self._actualizar_grid()
-        self._actualizar_barra_seleccion()
-
-    def alternar_seleccion(self):
-        self.modo_seleccion = not self.modo_seleccion
-        if not self.modo_seleccion:
-            self.habitaciones_seleccionadas.clear()
-        self._actualizar_grid()
-        self._actualizar_barra_seleccion()
-        return self.modo_seleccion
 
     def obtener_seleccion(self):
         return self.habitaciones_seleccionadas

@@ -38,7 +38,7 @@ def handle_error(
     
     # Mostrar en UI si se proporciona página
     if mostrar_snackbar and pagina:
-        pagina.show_snack_bar(
+        pagina.open(
             ft.SnackBar(
                 content=ft.Text(msg),
                 bgcolor=ft.Colors.RED_800,

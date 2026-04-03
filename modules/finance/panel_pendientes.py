@@ -13,6 +13,7 @@ from utils.db import sesion
 from database.models import Huesped, Estadia, FolioLinea
 from sqlalchemy.orm import selectinload
 from utils.calculos_financieros import a_bs
+from database.connection import SesionLocal
 
 
 # ── Punto de entrada ─────────────────────────────────────────────────────────

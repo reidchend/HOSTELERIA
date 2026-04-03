@@ -173,23 +173,22 @@ def principal(pagina: ft.Page):
         DialogoCrearGrupo(
             pagina, 
             habitaciones, 
-            al_crear=lambda g: _mostrar_dialogo_checkin_grupal(g)
+            al_crear=lambda *args: _mostrar_dialogo_checkin_grupal(args[0], args[1])
         ).mostrar()
 
-    def _mostrar_dialogo_checkin_grupal(grupo):
+    def _mostrar_dialogo_checkin_grupal(grupo_id, grupo_nombre):
+        
         def _(e):
             if e.control.text == "Sí, hacer Check-in":
-                iniciar_checkin_grupal(grupo)
+                iniciar_checkin_grupal(grupo_id, grupo_nombre)
             elif e.control.text == "No, solo crear grupo":
                 refrescar_grid()
-                pagina.show_snack_bar(
-                    ft.SnackBar(content=ft.Text(f"Grupo '{grupo.nombre}' creado. Accede a Grupos para ver el estado."))
-                )
+                pagina.open(ft.SnackBar(content=ft.Text(f"Grupo '{grupo_nombre}' creado. Accede a Grupos para ver el estado.")))
             pagina.close(dlg_confirm)
         
         dlg_confirm = ft.AlertDialog(
             title=ft.Text("Grupo creado"),
-            content=ft.Text(f"El grupo '{grupo.nombre}' ha sido creado. ¿Desea hacer el check-in de las habitaciones ahora?"),
+            content=ft.Text(f"El grupo '{grupo_nombre}' ha sido creado. ¿Desea hacer el check-in de las habitaciones ahora?"),
             actions=[
                 ft.TextButton("No, solo crear grupo", on_click=_),
                 ft.ElevatedButton("Sí, hacer Check-in", on_click=_),
@@ -198,16 +197,43 @@ def principal(pagina: ft.Page):
         )
         pagina.open(dlg_confirm)
 
-    def iniciar_checkin_grupal(grupo):
+    def iniciar_checkin_grupal(grupo_id, grupo_nombre):
         from modules.rooms.checkin_grupal import DialogoCheckInGrupal
+        from database.models import GrupoHabitacion
+        
         sesion = SesionLocal()
         try:
-            habs = sesion.query(Habitacion).filter(Habitacion.grupo_id == grupo.id).all()
+            # Obtener el grupo fresco desde la BD
+            grupo = sesion.get(GrupoHabitacion, grupo_id)
+            if not grupo:
+                pagina.open(ft.SnackBar(content=ft.Text("Error: Grupo no encontrado")))
+                return
+            
+            # Cargar las habitaciones del grupo
+            habs = list(grupo.habitaciones) if grupo.habitaciones else []
+            
+            print(f"[DEBUG] Grupo: {grupo_nombre}, Habitaciones: {len(habs)}")
+            for h in habs:
+                print(f"[DEBUG]   - Hab {h.numero}: estado={h.estado}, grupo_id={h.grupo_id}")
+            
+            # Comparar con el enum EstadoHabitacion.FREE
             habs_libres = [h for h in habs if h.estado == EstadoHabitacion.FREE]
             if habs_libres:
-                DialogoCheckInGrupal(pagina, habs_libres, grupo, al_completar=refrescar_grid).mostrar()
+                DialogoCheckInGrupal(
+                    pagina, habs_libres, grupo, 
+                    al_completar=refrescar_grid,
+                    al_refrescar=refrescar_grid
+                ).mostrar()
             else:
-                pagina.show_snack_bar(ft.SnackBar(content=ft.Text("No hay habitaciones disponibles para hacer check-in")))
+                if habs:
+                    pagina.open(ft.SnackBar(content=ft.Text(f"El grupo tiene {len(habs)} habitación(es) pero ninguna está libre. Estado: {habs[0].estado}")))
+                else:
+                    pagina.open(ft.SnackBar(content=ft.Text("El grupo no tiene habitaciones asociadas")))
+        except Exception as e:
+            print(f"[ERROR] iniciar_checkin_grupal: {e}")
+            import traceback
+            traceback.print_exc()
+            pagina.open(ft.SnackBar(content=ft.Text(f"Error: {e}")))
         finally:
             sesion.close()
 
