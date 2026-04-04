@@ -113,7 +113,6 @@ class Reservacion(Base):
     Reservación de habitación — puede venir del formulario web o crearse
     directamente en el sistema.
 
-    No tiene habitacion_id — solo el tipo de habitación deseado.
     Al hacer check-in se convierte y se le asigna una habitación concreta.
     """
 
@@ -138,8 +137,12 @@ class Reservacion(Base):
     origen = Column(String(20), default="sistema")  # "sistema" | "web"
     creado_en = Column(DateTime, default=datetime.now)
     confirmado_en = Column(DateTime, nullable=True)
+    # Habitación asignada (nullable hasta que se asigne)
+    habitacion_id = Column(Integer, ForeignKey("rooms.id"), nullable=True)
     # Relación con la estadía resultante
     estadia_id = Column(Integer, ForeignKey("stays.id"), nullable=True)
+
+    habitacion = relationship("Habitacion")
 
 
 class TipoHabitacion(Base):

@@ -460,7 +460,7 @@ class DialogoCheckIn:
         fecha_salida = datetime.strptime(self.campo_salida.value, "%Y-%m-%d")
         
         noches = max(1, (fecha_salida - fecha_entrada).days)
-        precio_noche = float(habitacion_bd.precio_actual_usd or habitacion_bd.precio_base_usd or 0)
+        precio_noche_decimal = habitacion_bd.precio_actual_usd or habitacion_bd.precio_base_usd or 0
 
         self.estadia_actual = Estadia(
             habitacion_id=habitacion_bd.id,
@@ -479,7 +479,7 @@ class DialogoCheckIn:
             estadia_id=self.estadia_actual.id,
             habitacion_numero=habitacion_bd.numero,
             noches=noches,
-            precio_noche_usd=precio_noche,
+            precio_noche_usd=precio_noche_decimal,
             config=config,
             concepto_extra=(
                 f"Hospedaje — Hab. {habitacion_bd.numero} "

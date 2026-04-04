@@ -101,46 +101,47 @@ def reiniciar_base_de_datos():
 
         # ── 4. Tipos de habitación ────────────────────────────────────────────
         print("Creando tipos de habitación...")
+        # PRECIOS FINALES (con IVA incluido). El sistema extrae el IVA internamente.
         tipos_catalogo = [
             TipoHabitacion(
                 nombre="MATRIMONIAL",
-                precio_base_usd=Decimal("25.86"),
-                precio_actual_usd=Decimal("25.86"),
+                precio_base_usd=Decimal("30.00"),
+                precio_actual_usd=Decimal("30.00"),
                 capacidad_default=2,
                 descripcion="Habitación matrimonial con amenidades básicas",
             ),
             TipoHabitacion(
                 nombre="DOBLE",
-                precio_base_usd=Decimal("30.17"),
-                precio_actual_usd=Decimal("30.17"),
+                precio_base_usd=Decimal("35.00"),
+                precio_actual_usd=Decimal("35.00"),
                 capacidad_default=2,
                 descripcion="Habitación doble",
             ),
             TipoHabitacion(
                 nombre="SUITE",
-                precio_base_usd=Decimal("30.17"),
-                precio_actual_usd=Decimal("30.17"),
+                precio_base_usd=Decimal("35.00"),
+                precio_actual_usd=Decimal("35.00"),
                 capacidad_default=2,
                 descripcion="Suite con sala de estar",
             ),
             TipoHabitacion(
                 nombre="TRIPLE",
-                precio_base_usd=Decimal("34.48"),
-                precio_actual_usd=Decimal("34.48"),
+                precio_base_usd=Decimal("40.00"),
+                precio_actual_usd=Decimal("40.00"),
                 capacidad_default=3,
                 descripcion="Habitación triple",
             ),
             TipoHabitacion(
                 nombre="QUINTUPLE",
-                precio_base_usd=Decimal("38.79"),
-                precio_actual_usd=Decimal("38.79"),
+                precio_base_usd=Decimal("45.00"),
+                precio_actual_usd=Decimal("45.00"),
                 capacidad_default=5,
                 descripcion="Habitación quíntuple",
             ),
             TipoHabitacion(
                 nombre="INDIVIDUAL",
-                precio_base_usd=Decimal("17.24"),
-                precio_actual_usd=Decimal("17.24"),
+                precio_base_usd=Decimal("20.00"),
+                precio_actual_usd=Decimal("20.00"),
                 capacidad_default=1,
                 descripcion="Habitación individual",
             ),

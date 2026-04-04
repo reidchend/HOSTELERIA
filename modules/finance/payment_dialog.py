@@ -848,7 +848,13 @@ class DialogoPago:
                     pago_dict["telefono_pm"] = campo_telefono.value.strip()
 
                 self.pagos_sesion.append(pago_dict)
+                
                 self.refrescar_interfaz()
+                
+                # Limpiar y cerrar el formulario para permitir seleccionar otro método
+                self.area_formulario.controls = []
+                self.seccion_sobrante.visible = False
+                self.pagina.update()
             except (ValueError, AttributeError):
                 campo_monto.error_text = "Número inválido"
                 campo_monto.update()
@@ -1456,67 +1462,160 @@ class DialogoPago:
 
             from decimal import Decimal as _D2
 
+            # ── Detectar si es pago grupal ────────────────────────────────────
+            es_grupo = self.checkin_info and self.checkin_info.get("es_grupo", False)
+            estadias_grupo = []
+            saldos_por_estadia = {}
+            
+            if es_grupo:
+                estadias_grupo = (
+                    sesion.query(Estadia)
+                    .options(
+                        selectinload(Estadia.huespedes),
+                        selectinload(Estadia.ledger_movimientos),
+                        selectinload(Estadia.folio_lineas),
+                    )
+                    .filter(Estadia.grupo_id == self.estadia.grupo_id, Estadia.activa == True)
+                    .all()
+                )
+                # Calcular saldo pendiente de cada estadía
+                for est in estadias_grupo:
+                    debe = sum(float(m.debe_usd or 0) for m in est.ledger_movimientos)
+                    haber = sum(float(m.haber_usd or 0) for m in est.ledger_movimientos)
+                    saldo = debe - haber
+                    if saldo > 0.01:
+                        saldos_por_estadia[est.id] = saldo
+
             # ── 1. Registrar cada Pago + asiento PAGO en el ledger ────────────
             for pago in self.pagos_sesion:
-                nuevo_pago = Pago(
-                    estadia_id=self.id_estadia,
-                    monto_usd=pago["monto_usd"],
-                    monto_bs=pago["monto_bs"],
-                    tasa_cambio=tasa,
-                    metodo=pago["metodo"],
-                    referencia=pago.get("referencia") or "—",
-                    descripcion=pago.get("descripcion_extra", "Cobro de factura"),
-                    creado_en=datetime.now(),
-                    es_devolucion=False,
-                )
-                sesion.add(nuevo_pago)
-                sesion.flush()
+                monto_restante = pago["monto_usd"]
+                
+                if es_grupo and saldos_por_estadia:
+                    # Distribuir el pago entre las estadías del grupo
+                    total_saldo_grupo = sum(saldos_por_estadia.values())
+                    
+                    for est_id, saldo_est in list(saldos_por_estadia.items()):
+                        if monto_restante <= 0:
+                            break
+                        
+                        # Monto proporcional para esta estadía
+                        proporcion = saldo_est / total_saldo_grupo
+                        monto_para_est = min(monto_restante, saldo_est)
+                        
+                        # Registrar pago para esta estadía
+                        nuevo_pago = Pago(
+                            estadia_id=est_id,
+                            monto_usd=monto_para_est,
+                            monto_bs=pago["monto_bs"] * (monto_para_est / pago["monto_usd"]) if pago["monto_usd"] > 0 else 0,
+                            tasa_cambio=tasa,
+                            metodo=pago["metodo"],
+                            referencia=pago.get("referencia") or "—",
+                            descripcion=f"Pago grupal - {self.checkin_info.get('nombre_grupo', 'Grupo')}",
+                            creado_en=datetime.now(),
+                            es_devolucion=False,
+                        )
+                        sesion.add(nuevo_pago)
+                        sesion.flush()
+                        
+                        # Asiento contable PAGO
+                        led.registrar_pago(
+                            sesion,
+                            estadia_id=est_id,
+                            concepto=nuevo_pago.descripcion or "Pago grupal",
+                            monto_usd=_D2(str(monto_para_est)),
+                            tasa=_D2(str(tasa)),
+                            referencia=pago.get("referencia") or "—",
+                            pago_id=nuevo_pago.id,
+                        )
+                        
+                        monto_restante -= monto_para_est
+                    
+                    # Si sobra monto del pago, registrarlo en la primera estadía
+                    if monto_restante > 0.01:
+                        nuevo_pago_extra = Pago(
+                            estadia_id=self.id_estadia,
+                            monto_usd=monto_restante,
+                            monto_bs=pago["monto_bs"] * (monto_restante / pago["monto_usd"]) if pago["monto_usd"] > 0 else 0,
+                            tasa_cambio=tasa,
+                            metodo=pago["metodo"],
+                            referencia=pago.get("referencia") or "—",
+                            descripcion=f"Pago grupal (excedente) - {self.checkin_info.get('nombre_grupo', 'Grupo')}",
+                            creado_en=datetime.now(),
+                            es_devolucion=False,
+                        )
+                        sesion.add(nuevo_pago_extra)
+                        sesion.flush()
+                        
+                        led.registrar_pago(
+                            sesion,
+                            estadia_id=self.id_estadia,
+                            concepto=nuevo_pago_extra.descripcion or "Pago grupal",
+                            monto_usd=_D2(str(monto_restante)),
+                            tasa=_D2(str(tasa)),
+                            referencia=pago.get("referencia") or "—",
+                            pago_id=nuevo_pago_extra.id,
+                        )
+                else:
+                    # Comportamiento normal (no grupal)
+                    nuevo_pago = Pago(
+                        estadia_id=self.id_estadia,
+                        monto_usd=pago["monto_usd"],
+                        monto_bs=pago["monto_bs"],
+                        tasa_cambio=tasa,
+                        metodo=pago["metodo"],
+                        referencia=pago.get("referencia") or "—",
+                        descripcion=pago.get("descripcion_extra", "Cobro de factura"),
+                        creado_en=datetime.now(),
+                        es_devolucion=False,
+                    )
+                    sesion.add(nuevo_pago)
+                    sesion.flush()
 
-                # Actualizar caja y crédito según método
-                if pago.get("es_saldo_favor"):
-                    monto_sf = pago["monto_usd"]
-                    huesped_ext_id = pago.get("huesped_externo_id")
-                    doc_ext = pago.get("huesped_externo_doc", "—")
-                    nombre_ext = pago.get("huesped_externo_nombre", "")
-                    if huesped_ext_id:
-                        h_ext = sesion.get(Huesped, huesped_ext_id)
-                        if h_ext:
-                            h_ext.credito_usd = max(
-                                _D2("0"),
-                                (_D2(str(h_ext.credito_usd or 0)) - _D2(str(monto_sf))),
-                            )
-                        nuevo_pago.descripcion = f"Saldo aplicado de {nombre_ext} (doc: {doc_ext}) a estadía #{self.id_estadia}"
-                    else:
-                        if estadia_bd and estadia_bd.huespedes:
-                            titular = sesion.get(Huesped, estadia_bd.huespedes[0].id)
-                            if titular:
-                                titular.credito_usd = max(
+                    # Actualizar caja y crédito según método
+                    if pago.get("es_saldo_favor"):
+                        monto_sf = pago["monto_usd"]
+                        huesped_ext_id = pago.get("huesped_externo_id")
+                        doc_ext = pago.get("huesped_externo_doc", "—")
+                        nombre_ext = pago.get("huesped_externo_nombre", "")
+                        if huesped_ext_id:
+                            h_ext = sesion.get(Huesped, huesped_ext_id)
+                            if h_ext:
+                                h_ext.credito_usd = max(
                                     _D2("0"),
-                                    (
-                                        _D2(str(titular.credito_usd or 0))
-                                        - _D2(str(monto_sf))
-                                    ),
+                                    (_D2(str(h_ext.credito_usd or 0)) - _D2(str(monto_sf))),
                                 )
-                elif pago["metodo"] in [
-                    MetodoPago.CASH_USD,
-                    MetodoPago.ZELLE,
-                ]:
-                    caja.saldo_principal_usd = _D2(
-                        str(caja.saldo_principal_usd or 0)
-                    ) + _D2(str(pago["monto_usd"]))
-                elif pago["metodo"] == MetodoPago.DEBIT_CARD:
-                    # Tarjeta Débito: entra en BS a nuestro banco
-                    caja.saldo_principal_bs = _D2(
-                        str(caja.saldo_principal_bs or 0)
-                    ) + _D2(str(pago["monto_bs"]))
-                    caja.saldo_principal_bs = _D2(
-                        str(caja.saldo_principal_bs or 0)
-                    ) + _D2(str(pago["monto_bs"]))
+                            nuevo_pago.descripcion = f"Saldo aplicado de {nombre_ext} (doc: {doc_ext}) a estadía #{self.id_estadia}"
+                        else:
+                            if estadia_bd and estadia_bd.huespedes:
+                                titular = sesion.get(Huesped, estadia_bd.huespedes[0].id)
+                                if titular:
+                                    titular.credito_usd = max(
+                                        _D2("0"),
+                                        (
+                                            _D2(str(titular.credito_usd or 0))
+                                            - _D2(str(monto_sf))
+                                        ),
+                                    )
+                    elif pago["metodo"] in [
+                        MetodoPago.CASH_USD,
+                        MetodoPago.ZELLE,
+                    ]:
+                        caja.saldo_principal_usd = _D2(
+                            str(caja.saldo_principal_usd or 0)
+                        ) + _D2(str(pago["monto_usd"]))
+                    elif pago["metodo"] == MetodoPago.DEBIT_CARD:
+                        # Tarjeta Débito: entra en BS a nuestro banco
+                        caja.saldo_principal_bs = _D2(
+                            str(caja.saldo_principal_bs or 0)
+                        ) + _D2(str(pago["monto_bs"]))
+                        caja.saldo_principal_bs = _D2(
+                            str(caja.saldo_principal_bs or 0)
+                        ) + _D2(str(pago["monto_bs"]))
 
-                # Asiento contable PAGO
-                led.registrar_pago(
-                    sesion,
-                    estadia_id=self.id_estadia,
+                    # Asiento contable PAGO
+                    led.registrar_pago(
+                        sesion,
+                        estadia_id=self.id_estadia,
                     concepto=nuevo_pago.descripcion or "Pago",
                     monto_usd=_D2(str(pago["monto_usd"])),
                     tasa=_D2(str(tasa)),
@@ -1631,91 +1730,111 @@ class DialogoPago:
 
             if self.checkin_info:
                 ci = self.checkin_info
-                es_pendiente = saldo_pendiente_tx > 0.01
-                bitacora_event_id = ci.get("bitacora_event_id")
-
                 reply_to_msg_id = None
-                if bitacora_event_id:
-                    try:
-                        from modules.notifications.dispatcher import (
-                            obtener_telegram_message_id,
-                        )
-
-                        reply_to_msg_id = obtener_telegram_message_id(bitacora_event_id)
-                        if reply_to_msg_id:
-                            reply_to_msg_id = int(reply_to_msg_id)
-                    except Exception as e:
-                        print(f"[PaymentDialog] Error al obtener reply_to: {e}")
-
-                _bita(
-                    sesion=sesion,
-                    pagina=self.pagina,
-                    tipo=_TE.CHECKIN,
-                    habitacion=hab_num,
-                    concepto=(
-                        f"Hab{ci['habitacion']} ${ci['monto']:.2f} "
-                        + (
-                            "pendiente por cancelar"
-                            if es_pendiente
-                            else f"cancelado — {ci['nombre']}"
-                        )
-                    ),
-                    monto_usd=total_pagado_usd,
-                    monto_bs=sum(p.get("monto_bs", 0) for p in self.pagos_sesion),
-                    confirmado=not es_pendiente,
-                    notificar_telegram=False,
-                )
-
-                try:
-                    from modules.notifications.formatter import pago_respuesta, checkin_grupal_mensaje
-                    from modules.notifications.dispatcher import enviar_texto
-
-                    recep = (self.pagina.session.get("usuario_activo") or {}).get(
-                        "nombre_completo", ""
+                
+                # Si es pago de reservación, NO enviar mensaje de check-in
+                # (el módulo de reservaciones ya envía su propio mensaje)
+                if ci.get("es_pago_reservacion"):
+                    _bita(
+                        sesion=sesion,
+                        pagina=self.pagina,
+                        tipo=_TE.CHECKIN,
+                        habitacion=hab_num,
+                        concepto=(
+                            f"CHECK-IN (Reserva) — {ci.get('nombre', '')} · "
+                            f"{ci.get('habitacion', '')}"
+                        ),
+                        monto_usd=ci.get("monto", total_pagado_usd),
+                        confirmado=True,
+                        notificar_telegram=False,
                     )
+                else:
+                    es_pendiente = saldo_pendiente_tx > 0.01
+                    bitacora_event_id = ci.get("bitacora_event_id")
                     
-                    # Si es un check-in grupal, usar el formato grupal
-                    if ci.get("es_grupo"):
-                        habitaciones_data = ci.get("habitaciones_data", [])
-                        nombre_grupo = ci.get("nombre_grupo", ci.get("habitacion", "Grupo"))
-                        
-                        msg = checkin_grupal_mensaje(
-                            nombre_grupo=nombre_grupo,
-                            habitaciones=habitaciones_data,
-                            huesped_principal=ci.get("nombre", ""),
-                            total_grupo=ci.get("monto", total_pagado_usd),
-                            noches=ci.get("noches", 1),
-                            fecha_salida=ci.get("fecha_salida", ""),
-                            recepcionista=recep,
-                            pagos=self.pagos_sesion,
-                            pendiente=False,
-                        )
-                    else:
-                        # Si hay sobrante y se seleccionó "propina", no mostrar pendiente
-                        modo_sobrante = getattr(self, "_radio_sobrante_valor", None)
-                        saldo_a_mostrar = saldo_pendiente_tx
-                        if pendiente < -0.01 and modo_sobrante == "no_devolver":
-                            saldo_a_mostrar = 0  # La propina ya se quedó en caja
-                        
-                        msg = pago_respuesta(
-                            habitacion=ci["habitacion"],
-                            nombre=ci["nombre"],
-                            monto_pagado=total_pagado_usd,
-                            pagos=self.pagos_sesion,
-                            saldo_pendiente=saldo_a_mostrar,
-                            recepcionista=recep,
-                            es_respuesta=reply_to_msg_id is not None,
-                            lineas_detalle=self._lineas_detalle,
-                            precio_habitacion=ci.get("monto", total_pagado_usd),
-                            es_operativo=ci.get("es_operativo", False),
-                            fecha_salida=ci.get("fecha_salida", ""),
-                        )
-                    enviar_texto(
-                        msg,
-                        reply_to_message_id=reply_to_msg_id,
+                    if bitacora_event_id:
+                        try:
+                            from modules.notifications.dispatcher import (
+                                obtener_telegram_message_id,
+                            )
+                            reply_to_msg_id = obtener_telegram_message_id(bitacora_event_id)
+                            if reply_to_msg_id:
+                                reply_to_msg_id = int(reply_to_msg_id)
+                        except Exception as e:
+                            print(f"[PaymentDialog] Error al obtener reply_to: {e}")
+                    
+                    _bita(
+                        sesion=sesion,
+                        pagina=self.pagina,
+                        tipo=_TE.CHECKIN,
+                        habitacion=hab_num,
+                        concepto=(
+                            f"Hab{ci['habitacion']} ${ci['monto']:.2f} "
+                            + (
+                                "pendiente por cancelar"
+                                if es_pendiente
+                                else f"cancelado — {ci['nombre']}"
+                            )
+                        ),
+                        monto_usd=total_pagado_usd,
+                        confirmado=True,
+                        notificar_telegram=True,
                     )
-                except Exception as _e:
-                    print(f"[PaymentDialog] Error Telegram checkin: {_e}")
+
+                # Si es pago de reservación, NO enviar mensaje desde aquí
+                # (el módulo de reservaciones ya envía su propio mensaje con los datos correctos)
+                if not ci.get("es_pago_reservacion"):
+                    try:
+                        from modules.notifications.formatter import pago_respuesta, checkin_grupal_mensaje
+                        from modules.notifications.dispatcher import enviar_texto
+
+                        recep = (self.pagina.session.get("usuario_activo") or {}).get(
+                            "nombre_completo", ""
+                        )
+                        
+                        # Si es un check-in grupal, usar el formato grupal
+                        if ci.get("es_grupo"):
+                            habitaciones_data = ci.get("habitaciones_data", [])
+                            nombre_grupo = ci.get("nombre_grupo", ci.get("habitacion", "Grupo"))
+                            
+                            msg = checkin_grupal_mensaje(
+                                nombre_grupo=nombre_grupo,
+                                habitaciones=habitaciones_data,
+                                huesped_principal=ci.get("nombre", ""),
+                                total_grupo=ci.get("monto", total_pagado_usd),
+                                noches=ci.get("noches", 1),
+                                fecha_salida=ci.get("fecha_salida", ""),
+                                recepcionista=recep,
+                                pagos=self.pagos_sesion,
+                                pendiente=False,
+                            )
+                        else:
+                            # Si hay sobrante y se seleccionó "propina", no mostrar pendiente
+                            modo_sobrante = getattr(self, "_radio_sobrante_valor", None)
+                            saldo_a_mostrar = saldo_pendiente_tx
+                            if pendiente < -0.01 and modo_sobrante == "no_devolver":
+                                saldo_a_mostrar = 0  # La propina ya se quedó en caja
+                            
+                            msg = pago_respuesta(
+                                habitacion=ci["habitacion"],
+                                nombre=ci["nombre"],
+                                monto_pagado=total_pagado_usd,
+                                pagos=self.pagos_sesion,
+                                saldo_pendiente=saldo_a_mostrar,
+                                recepcionista=recep,
+                                es_respuesta=reply_to_msg_id is not None,
+                                lineas_detalle=self._lineas_detalle,
+                                precio_habitacion=ci.get("monto", total_pagado_usd),
+                                es_operativo=ci.get("es_operativo", False),
+                                fecha_salida=ci.get("fecha_salida", ""),
+                                noches=ci.get("noches", 0),
+                            )
+                        enviar_texto(
+                            msg,
+                            reply_to_message_id=reply_to_msg_id,
+                        )
+                    except Exception as _e:
+                        print(f"[PaymentDialog] Error Telegram checkin: {_e}")
 
             else:
                 # Pago desde details.py (no es check-in nuevo) → bitácora normal + Telegram
@@ -1789,10 +1908,18 @@ class DialogoPago:
                 )
             )
             if self.al_completar:
-                self.al_completar()
+                import inspect
+                sig = inspect.signature(self.al_completar)
+                if "pagos_sesion" in sig.parameters:
+                    self.al_completar(pagos_sesion=self.pagos_sesion)
+                else:
+                    self.al_completar()
 
         except Exception as error:
             sesion.rollback()
+            import traceback
+            traceback.print_exc()
+            print(f"[PaymentDialog] Error al registrar el pago: {error}")
             self.pagina.open(
                 ft.SnackBar(
                     ft.Text(f"Error al registrar el pago: {error}"),

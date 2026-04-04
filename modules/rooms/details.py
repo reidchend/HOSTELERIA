@@ -1,7 +1,7 @@
 # modules/rooms/details.py
 
 import flet as ft
-from datetime import timedelta
+from datetime import timedelta, datetime
 from sqlalchemy.orm import selectinload
 from database.connection import SesionLocal
 from database.models import (
@@ -14,12 +14,17 @@ from database.models import (
     TipoLinea,
     LedgerMovimiento,
     TipoMovimiento,
+    Reservacion,
+    EstadoReservacion,
+    Huesped,
+    EstadoHabitacion,
 )
 from utils.calculos_financieros import leer_config_financiera, a_bs
 from modules.finance.engine import folio as folio_engine
 from modules.finance.bitacora import registrar as _bita
 from database.models import TipoEvento as _TE
 from modules.finance.engine import ledger as led
+from modules.finance.payment_dialog import DialogoPago
 
 
 class DialogoDetallesHabitacion:
@@ -972,6 +977,334 @@ class DialogoDetallesHabitacion:
         if self.al_actualizar_grid:
             self.al_actualizar_grid()
         self.mostrar()
+
+    def mostrar(self):
+        self.dialogo = self.construir()
+        self.pagina.open(self.dialogo)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# DIÁLOGO DETALLES RESERVACIÓN
+# ═══════════════════════════════════════════════════════════════════════
+
+class DialogoDetallesReservacion:
+    """
+    Modal de detalle de una habitación RESERVADA.
+    Muestra la información de la reservación y permite:
+    - Ver detalles del huésped y la reservación
+    - Dar entrada (check-in)
+    - Cancelar la reservación
+    """
+
+    def __init__(self, pagina: ft.Page, habitacion: Habitacion, al_completar=None):
+        self.pagina = pagina
+        self.habitacion = habitacion
+        self.al_completar = al_completar
+        self.dialogo = None
+        self.reservacion = None
+
+    def construir(self) -> ft.AlertDialog:
+        sesion = SesionLocal()
+        try:
+            hab_datos = (
+                sesion.query(Habitacion)
+                .filter(Habitacion.id == self.habitacion.id)
+                .first()
+            )
+
+            if not hab_datos or hab_datos.estado.name != "RESERVED":
+                return ft.AlertDialog(
+                    title=ft.Text("Aviso"),
+                    content=ft.Text("Esta habitación no tiene una reservación activa."),
+                )
+
+            # Buscar la reservación asociada
+            reserv = (
+                sesion.query(Reservacion)
+                .options(
+                    selectinload(Reservacion.habitacion),
+                )
+                .filter(
+                    Reservacion.habitacion_id == hab_datos.id,
+                    Reservacion.estado == EstadoReservacion.CONFIRMADA,
+                )
+                .first()
+            )
+
+            if not reserv:
+                reserv = (
+                    sesion.query(Reservacion)
+                    .options(
+                        selectinload(Reservacion.habitacion),
+                    )
+                    .filter(
+                        Reservacion.habitacion_id == hab_datos.id,
+                        Reservacion.estado == EstadoReservacion.PENDIENTE,
+                    )
+                    .first()
+                )
+
+            if not reserv:
+                return ft.AlertDialog(
+                    title=ft.Text("Aviso"),
+                    content=ft.Text("No se encontró una reservación para esta habitación."),
+                )
+
+            self.reservacion = reserv
+            config = leer_config_financiera(sesion)
+            tasa = config.tasa_cambio
+            noches = (reserv.fecha_salida - reserv.fecha_entrada).days
+
+            # Calcular precio
+            precio = 0.0
+            for t in [None]:  # placeholder, precio viene de tipo_habitacion
+                pass
+
+            # ── Encabezado ──────────────────────────────────────────────
+            estado_color = ft.Colors.BLUE_700 if reserv.estado == EstadoReservacion.CONFIRMADA else ft.Colors.AMBER_700
+            estado_txt = "CONFIRMADA" if reserv.estado == EstadoReservacion.CONFIRMADA else "PENDIENTE"
+
+            encabezado = ft.Container(
+                content=ft.Column([
+                    ft.Row([
+                        ft.Icon(ft.Icons.EVENT_AVAILABLE, color=estado_color, size=20),
+                        ft.Text(f"Reservación {estado_txt}", size=16, weight="bold", color=estado_color),
+                    ]),
+                    ft.Divider(height=4),
+                    ft.Row([
+                        ft.Column([
+                            ft.Text("Huésped", size=9, color=ft.Colors.GREY_600),
+                            ft.Text(f"{reserv.nombre} {reserv.apellido}", size=13, weight="bold"),
+                        ]),
+                        ft.Column([
+                            ft.Text("Documento", size=9, color=ft.Colors.GREY_600),
+                            ft.Text(reserv.documento or "No registrado", size=12),
+                        ]),
+                        ft.Column([
+                            ft.Text("Teléfono", size=9, color=ft.Colors.GREY_600),
+                            ft.Text(reserv.telefono or "No registrado", size=12),
+                        ]),
+                    ]),
+                ], spacing=5),
+                padding=12,
+                bgcolor=ft.Colors.with_opacity(0.08, estado_color),
+                border_radius=10,
+            )
+
+            # ── Detalles de la reservación ──────────────────────────────
+            detalles = ft.Container(
+                content=ft.Column([
+                    ft.Text("Detalles de la Reservación", size=14, weight="bold"),
+                    ft.Row([
+                        self._chip_detalle("🛏", "Tipo", reserv.tipo_habitacion),
+                        self._chip_detalle("🏠", "Habitación", f"N° {hab_datos.numero}"),
+                        self._chip_detalle("👥", "Huéspedes", str(reserv.num_huespedes)),
+                    ]),
+                    ft.Row([
+                        self._chip_detalle("📅", "Entrada", reserv.fecha_entrada.strftime("%d/%m/%Y")),
+                        self._chip_detalle("📅", "Salida", reserv.fecha_salida.strftime("%d/%m/%Y")),
+                        self._chip_detalle("🌙", "Noches", str(noches)),
+                    ]),
+                    ft.Row([
+                        self._chip_detalle("🌐", "Origen", "Web" if reserv.origen == "web" else "Sistema"),
+                        self._chip_detalle("🕐", "Creada", reserv.creado_en.strftime("%d/%m %H:%M")),
+                    ]),
+                ] + ([ft.Text(f"📝 {reserv.notas}", size=12, italic=True, color=ft.Colors.GREY_600)] if reserv.notas else []),
+                spacing=8),
+                padding=12,
+                border=ft.border.all(1, ft.Colors.OUTLINE),
+                border_radius=10,
+            )
+
+            # ── Botones de acción ───────────────────────────────────────
+            btn_cambiar_hab = ft.ElevatedButton(
+                "Cambiar Habitación",
+                icon=ft.Icons.SWAP_HORIZ,
+                bgcolor=ft.Colors.ORANGE_700,
+                color=ft.Colors.WHITE,
+                on_click=lambda _: self._cambiar_habitacion(reserv, hab_datos),
+            )
+
+            btn_entrada = ft.ElevatedButton(
+                "Dar Entrada (Check-In)",
+                icon=ft.Icons.LOGIN,
+                bgcolor=ft.Colors.GREEN_700,
+                color=ft.Colors.WHITE,
+                on_click=lambda _: self._dar_entrada(reserv),
+            )
+
+            btn_cancelar = ft.ElevatedButton(
+                "Cancelar Reservación",
+                icon=ft.Icons.CANCEL,
+                bgcolor=ft.Colors.RED_700,
+                color=ft.Colors.WHITE,
+                on_click=lambda _: self._cancelar_reservacion(reserv),
+            )
+
+            return ft.AlertDialog(
+                title=ft.Row([
+                    ft.Icon(ft.Icons.HOTEL, color=ft.Colors.BLUE_700),
+                    ft.Text(f"Hab. {hab_datos.numero} — Reservación", size=16, weight="bold"),
+                ], spacing=8),
+                content=ft.Container(
+                    content=ft.Column([
+                        encabezado,
+                        detalles,
+                    ], spacing=12, scroll=ft.ScrollMode.AUTO),
+                    width=500,
+                    height=450,
+                ),
+                actions=[
+                    ft.TextButton("Cerrar", on_click=lambda _: self.pagina.close(self.dialogo)),
+                    btn_cambiar_hab,
+                    btn_cancelar,
+                    btn_entrada,
+                ],
+                actions_alignment=ft.MainAxisAlignment.END,
+                shape=ft.RoundedRectangleBorder(radius=14),
+            )
+        finally:
+            sesion.close()
+
+    def _chip_detalle(self, icono: str, etiqueta: str, valor: str) -> ft.Column:
+        return ft.Column([
+            ft.Text(f"{icono} {etiqueta}", size=9, color=ft.Colors.GREY_600),
+            ft.Text(valor, size=12, weight="bold"),
+        ], spacing=1)
+
+    def _cambiar_habitacion(self, reserv, hab_actual):
+        sesion = SesionLocal()
+        try:
+            # Re-query the reservation in the current session
+            r = sesion.query(Reservacion).filter(Reservacion.id == reserv.id).first()
+            if not r:
+                self.pagina.open(ft.SnackBar(ft.Text("Reservación no encontrada"), bgcolor=ft.Colors.RED_700))
+                return
+            
+            habs_libres = sesion.query(Habitacion).filter(
+                Habitacion.tipo == r.tipo_habitacion,
+                Habitacion.estado == EstadoHabitacion.FREE,
+            ).all()
+            
+            if not habs_libres:
+                self.pagina.open(ft.SnackBar(
+                    ft.Text(f"No hay habitaciones {r.tipo_habitacion} disponibles"),
+                    bgcolor=ft.Colors.RED_700,
+                ))
+                return
+            
+            opciones = [ft.dropdown.Option(str(h.id), f"Hab. {h.numero} (Piso {h.piso})") for h in habs_libres]
+            dd_hab = ft.Dropdown(
+                label="Nueva Habitación",
+                options=opciones,
+                value=str(habs_libres[0].id),
+                expand=True,
+            )
+            
+            def confirmar(_):
+                nueva_hab_id = int(dd_hab.value)
+                nueva_hab = sesion.get(Habitacion, nueva_hab_id)
+                if nueva_hab:
+                    # Liberar habitación actual
+                    hab = sesion.get(Habitacion, r.habitacion_id)
+                    if hab:
+                        hab.estado = EstadoHabitacion.FREE
+                    
+                    # Asignar nueva habitación
+                    r.habitacion_id = nueva_hab_id
+                    nueva_hab.estado = EstadoHabitacion.RESERVED
+                    
+                    _bita(sesion=sesion, pagina=self.pagina, tipo=_TE.RESERVACION,
+                          concepto=f"Hab. cambiada de {hab_actual.numero} a {nueva_hab.numero} — {r.nombre} {r.apellido}",
+                          notificar_telegram=False)
+                    sesion.commit()
+                    self.pagina.close(dlg_cambiar)
+                    self._refrescar()
+                    self.pagina.open(ft.SnackBar(
+                        ft.Text(f"Habitación cambiada a Hab. {nueva_hab.numero}"),
+                        bgcolor=ft.Colors.GREEN_700,
+                    ))
+                sesion.close()
+            
+            dlg_cambiar = ft.AlertDialog(
+                modal=True,
+                title=ft.Text(f"Cambiar Habitación - {r.nombre} {r.apellido}"),
+                content=ft.Container(
+                    content=ft.Column([
+                        ft.Text(f"Habitación actual: Hab. {hab_actual.numero}", size=12, color=ft.Colors.GREY_600),
+                        ft.Text(f"Tipo: {r.tipo_habitacion}", size=12),
+                        ft.Divider(),
+                        dd_hab,
+                    ], spacing=8),
+                    width=400,
+                ),
+                actions=[
+                    ft.TextButton("Cancelar", on_click=lambda _: self.pagina.close(dlg_cambiar)),
+                    ft.ElevatedButton("Cambiar", icon=ft.Icons.SWAP_HORIZ, on_click=confirmar),
+                ],
+                actions_alignment=ft.MainAxisAlignment.END,
+            )
+            self.pagina.open(dlg_cambiar)
+        except Exception as e:
+            sesion.rollback()
+            self.pagina.open(ft.SnackBar(ft.Text(f"Error: {e}"), bgcolor=ft.Colors.RED_700))
+        finally:
+            sesion.close()
+
+    def _dar_entrada(self, reserv):
+        from modules.rooms.checkin_reservacion import DialogoCheckInReservacion
+        self.pagina.close(self.dialogo)
+        DialogoCheckInReservacion(
+            pagina=self.pagina,
+            reserva=reserv,
+            al_completar=self._refrescar,
+        ).mostrar()
+
+    def _cancelar_reservacion(self, reserv):
+        def confirmar(_):
+            self.pagina.close(dlg_confirm)
+            sesion = SesionLocal()
+            try:
+                r = sesion.get(Reservacion, reserv.id)
+                r.estado = EstadoReservacion.CANCELADA
+                # Liberar la habitación
+                if r.habitacion_id:
+                    hab = sesion.get(Habitacion, r.habitacion_id)
+                    if hab:
+                        hab.estado = "FREE"
+                _bita(sesion=sesion, pagina=self.pagina, tipo=_TE.RESERVACION,
+                      concepto=f"Reservación CANCELADA — {r.nombre} {r.apellido}")
+                sesion.commit()
+                self.pagina.close(self.dialogo)
+                if self.al_completar:
+                    self.al_completar()
+                self.pagina.open(ft.SnackBar(
+                    ft.Text("Reservación cancelada"),
+                    bgcolor=ft.Colors.RED_700,
+                ))
+            except Exception as e:
+                sesion.rollback()
+                self.pagina.open(ft.SnackBar(ft.Text(str(e)), bgcolor=ft.Colors.RED_700))
+            finally:
+                sesion.close()
+
+        dlg_confirm = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("¿Cancelar reservación?"),
+            content=ft.Text("Esta acción no se puede deshacer.", color=ft.Colors.GREY_600),
+            actions=[
+                ft.TextButton("Volver", on_click=lambda _: self.pagina.close(dlg_confirm)),
+                ft.ElevatedButton("Sí, cancelar", bgcolor=ft.Colors.RED_700, color=ft.Colors.WHITE, on_click=confirmar),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        self.pagina.open(dlg_confirm)
+
+    def _refrescar(self):
+        if self.dialogo:
+            self.pagina.close(self.dialogo)
+        if self.al_completar:
+            self.al_completar()
 
     def mostrar(self):
         self.dialogo = self.construir()

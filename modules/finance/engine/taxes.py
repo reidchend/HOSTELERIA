@@ -2,6 +2,9 @@
 """
 Motor de cálculo de impuestos.
 Trabaja exclusivamente con Decimal para garantizar precisión exacta.
+
+Los precios se guardan como PRECIO FINAL (con IVA incluido).
+El sistema extrae el IVA internamente.
 """
 from utils.decimal_utils import Decimal, ROUND_HALF_UP, D
 
@@ -26,22 +29,27 @@ def desglosar_precio(
 ) -> tuple:
     """
     Calcula los componentes de una línea del folio.
+    
+    El precio_unitario es el PRECIO FINAL (con IVA incluido).
+    Se extrae el subtotal (base sin IVA) y el IVA.
 
     Devuelve:
         (subtotal, iva, total)  ← todos Decimal, redondeados a 2 cifras
-
-    El subtotal se redondea primero; el IVA es la diferencia técnica
-    para que subtotal + iva == total exactamente (sin centavos perdidos).
+    
+    El total siempre es igual al precio final configurado × cantidad.
+    El IVA se extrae del total: iva = total - (total / (1 + iva%))
     """
-    subtotal_exacto = precio_unitario * cantidad
-    subtotal = subtotal_exacto.quantize(_CENT, rounding=ROUND_HALF_UP)
+    total_exacto = precio_unitario * cantidad
+    total = total_exacto.quantize(_CENT, rounding=ROUND_HALF_UP)
 
     if aplica_iva and porcentaje_iva > 0:
-        total_exacto = subtotal_exacto * (D("1") + porcentaje_iva / D("100"))
-        total = total_exacto.quantize(_CENT, rounding=ROUND_HALF_UP)
-        iva   = total - subtotal          # diferencia exacta, sin error de redondeo
+        # Extraer el IVA del precio final (que ya lo incluye)
+        # subtotal = total / (1 + iva/100)
+        factor = D("1") + porcentaje_iva / D("100")
+        subtotal = (total / factor).quantize(_CENT, rounding=ROUND_HALF_UP)
+        iva = total - subtotal  # diferencia exacta
     else:
         iva   = D("0")
-        total = subtotal
+        subtotal = total
 
     return subtotal, iva, total

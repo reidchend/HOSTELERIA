@@ -303,20 +303,35 @@ class DialogoCheckInGrupal:
                         estadia.huespedes.append(huesped)
                 
                 noches = (fecha_sal.date() - fecha_ent.date()).days
-                precio_noche = float(hab.precio_actual_usd or 0)
+                precio_noche_decimal = hab.precio_actual_usd or 0
+                precio_noche = float(precio_noche_decimal)
+                
+                print(f"[DEBUG CheckInGrupal] Hab {hab.numero}: precio_noche_decimal={precio_noche_decimal}, tipo={type(precio_noche_decimal)}, precio_noche_float={precio_noche}, noches={noches}")
+                print(f"[DEBUG CheckInGrupal] precio_noche * noches = {precio_noche * noches}")
                 
                 datos_grupo.append({
                     "numero": hab.numero,
                     "huesped": huesped_nombre,
-                    "total_sin_iva": precio_noche * noches,
+                    "total_sin_iva": round(precio_noche * noches, 2),
                 })
                 
                 if precio_noche > 0:
                     # Usar la función del engine de folio para calcular IVA correctamente
                     from modules.finance.engine import folio as folio_engine
                     from utils.calculos_financieros import leer_config_financiera
+                    from decimal import Decimal
                     
                     config = leer_config_financiera(sesion)
+                    linea_hosp = folio_engine.crear_linea_hospedaje(
+                        sesion=sesion,
+                        estadia_id=estadia.id,
+                        habitacion_numero=hab.numero,
+                        noches=noches,
+                        precio_noche_usd=Decimal(str(hab.precio_actual_usd or 0)),
+                        config=config,
+                        concepto_extra=f"Hospedaje {hab.numero} - {noches} noche(s)",
+                        aplica_iva=True,
+                    )
                     
                     linea_hosp = folio_engine.crear_linea_hospedaje(
                         sesion=sesion,

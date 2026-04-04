@@ -244,6 +244,13 @@ def principal(pagina: ft.Page):
             DialogoCheckIn(pagina, habitacion, al_completar=refrescar_grid).mostrar()
         elif habitacion.estado == EstadoHabitacion.CLEANING:
             _mostrar_dialogo_limpieza(habitacion)
+        elif habitacion.estado == EstadoHabitacion.RESERVED:
+            from modules.rooms.details import DialogoDetallesReservacion
+            DialogoDetallesReservacion(
+                pagina,
+                habitacion,
+                al_completar=refrescar_grid,
+            ).mostrar()
         elif habitacion.estado == EstadoHabitacion.OCCUPIED:
             DialogoDetallesHabitacion(
                 pagina,

@@ -69,14 +69,21 @@ class DialogoAperturaTurno:
             return
         self._procesando = True
         
-        # Cerrar el modal inmediatamente para evitar doble cliqueo
-        self.pagina.close(self.dialogo)
+        # Leer los valores INMEDIATAMENTE antes de cualquier otra operación
+        try:
+            usd_fisico     = float(self.campo_usd.value or 0)
+            bs_fisico      = float(self.campo_bs.value or 0)
+            tasa_ingresada = float(self.campo_tasa.value or 0)
+        except (ValueError, TypeError):
+            self._procesando = False
+            self.pagina.open(ft.SnackBar(
+                ft.Text("Error: Ingrese montos numéricos válidos"),
+                bgcolor=ft.Colors.RED_700,
+            ))
+            return
         
         sesion = SesionLocal()
         try:
-            usd_fisico     = float(self.campo_usd.value)
-            bs_fisico      = float(self.campo_bs.value)
-            tasa_ingresada = float(self.campo_tasa.value)
 
             # 1. Crear registro del turno
             nuevo_turno = Turno(
@@ -167,16 +174,31 @@ class DialogoAperturaTurno:
             else:
                 print("[AperturaTurno] Sin cambios en caja chica — movimiento omitido.")
 
-            self.pagina.close(self.dialogo)
-            self.pagina.update()  # Forzar actualización
-            self.al_completar(tasa_ingresada)
-            self.pagina.open(ft.SnackBar(
-                ft.Text("Turno abierto y caja sincronizada"),
-                bgcolor=ft.Colors.GREEN_700,
-            ))
+            # Cerrar el modal y reconstruir la UI después
+            dialogo_a_cerrar = self.dialogo
+            self.dialogo = None
+            
+            # Forzar cierre explícito del modal
+            if dialogo_a_cerrar:
+                dialogo_a_cerrar.open = False
+                self.pagina.dialog = None
+                self.pagina.update()
+            
+            # Usar run_task para retrasar la reconstrucción de la UI hasta que el modal se cierre
+            async def _reconstruir_despues():
+                import asyncio
+                await asyncio.sleep(0.2)  # Esperar a que el frontend procese el cierre
+                self.al_completar(tasa_ingresada)
+                self.pagina.open(ft.SnackBar(
+                    ft.Text("Turno abierto y caja sincronizada"),
+                    bgcolor=ft.Colors.GREEN_700,
+                ))
+            
+            self.pagina.run_task(_reconstruir_despues)
 
         except ValueError:
-            self.pagina.close(self.dialogo)
+            if self.dialogo:
+                self.pagina.close(self.dialogo)
             self.pagina.open(ft.SnackBar(
                 ft.Text("Error: Ingrese montos numéricos válidos"),
                 bgcolor=ft.Colors.RED_700,
@@ -184,7 +206,8 @@ class DialogoAperturaTurno:
             self._procesando = False
         except Exception as error:
             sesion.rollback()
-            self.pagina.close(self.dialogo)
+            if self.dialogo:
+                self.pagina.close(self.dialogo)
             handle_error(error, self.pagina, "Apertura turno")
             self.pagina.open(ft.SnackBar(
                 ft.Text(f"Error al abrir turno: {error}"),

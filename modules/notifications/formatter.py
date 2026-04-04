@@ -377,7 +377,68 @@ def desde_evento(evento, tasa: float = 0) -> str:
 
     if not confirmado and tipo != TipoEvento.CARGO_EXTRA:
         lineas.append("⏳ <i>Pendiente por cancelar</i>")
+    lineas.append(_hora())
 
+    return "\n".join(filter(None, lineas))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# RESERVACIONES
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def reservacion_pendiente_mensaje(
+    nombre: str,
+    tipo_habitacion: str,
+    fecha_entrada: str = "",
+    fecha_salida: str = "",
+    noches: int = 0,
+    total: float = 0,
+) -> str:
+    """Mensaje de reservación pendiente por cancelar."""
+    lineas = [
+        _HOTEL,
+        _SEP,
+        f"📋 <b>RESERVACIÓN PENDIENTE</b>",
+        f"👤 {nombre}",
+        f"🛏 {tipo_habitacion}",
+        f"💰 ${total:,.2f}  ⏳ Pendiente por cancelar",
+    ]
+    
+    if fecha_entrada and fecha_salida:
+        lineas.append(f"📅 {fecha_entrada} → {fecha_salida} · {noches} noche(s)")
+    
+    lineas.append(_hora())
+    return "\n".join(filter(None, lineas))
+
+
+def reservacion_pagada_mensaje(
+    nombre: str,
+    tipo_habitacion: str,
+    fecha_entrada: str = "",
+    fecha_salida: str = "",
+    noches: int = 0,
+    total: float = 0,
+    pagos: list = None,
+) -> str:
+    """Mensaje de reservación pagada."""
+    lineas = [
+        _HOTEL,
+        _SEP,
+        f"✅ <b>RESERVACIÓN PAGADA</b>",
+        f"👤 {nombre}",
+        f"🛏 {tipo_habitacion}",
+    ]
+    
+    if pagos:
+        metodos_txt = _formatear_metodos(pagos)
+        lineas.append(f"💰 ${total:,.2f}  ✅ cancelado por\n   {metodos_txt.strip()}")
+    else:
+        lineas.append(f"💰 ${total:,.2f}  ✅ cancelado")
+    
+    if fecha_entrada and fecha_salida:
+        lineas.append(f"📅 {fecha_entrada} → {fecha_salida} · {noches} noche(s)")
+    
     lineas.append(_hora())
     return "\n".join(filter(None, lineas))
 
@@ -484,6 +545,7 @@ def pago_respuesta(
     precio_habitacion: float = 0,
     es_operativo: bool = False,
     fecha_salida: str = "",
+    noches: int = 0,
 ) -> str:
     """
     Mensaje de confirmación de pago que responde al mensaje original del check-in.
@@ -547,7 +609,7 @@ def pago_respuesta(
             habitacion=habitacion,
             precio_usd=precio_real,
             nombre=nombre,
-            noches=1 if es_operativo else 0,
+            noches=noches,
             fecha_salida=fecha_salida,
             recepcionista=recepcionista,
             pagos=pagos,
